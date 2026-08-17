@@ -1,0 +1,45 @@
+# iterated-consensus preset: bwa mem for mapping, `samtools consensus` for
+# consensus calling.
+#
+# bwa mem takes exactly one file per mate (no comma-lists), so this uses
+# {cat:reads_1}/{cat:reads_2} to materialize a single concatenated file per
+# mate the first time it's needed -- cheap if you only gave one file per
+# mate, a one-off concatenation if you gave several.
+#
+# Assumes paired-end input. Fill in [input] below (delete whichever
+# alternative you don't need), then:
+#   iterated-consensus run --config pipelines.toml --out-dir results/
+#
+# See bowtie2_ivar.toml (or the README) for the full placeholder/templating
+# reference.
+
+[[mapper]]
+name = "bwa"
+index_cmd = ["bwa", "index", "-p", "{index_prefix}", "{reference}"]
+map_cmd = "bwa mem -t {threads} {index_prefix} {cat:reads_1} {cat:reads_2} | samtools sort -@ {threads} -o {bam}"
+
+[consensus]
+steps = [
+    "samtools index {bam}",
+    "samtools consensus -a -f fasta -o {consensus_prefix}.fa {bam}",
+]
+output = "{consensus_prefix}.fa"
+
+[input]
+# --- FASTQ start ---
+# mate1 = ["reads_R1.fastq.gz"]
+# mate2 = ["reads_R2.fastq.gz"]
+# reference = "starting_reference.fasta"
+# # ...or fetch the starting reference from NCBI instead of a local file:
+# # accession = "NC_045512.2"
+
+# --- BAM start (use this instead of the FASTQ block above) ---
+# bam = "input.bam"
+# reference_name = "chr1"   # only needed if the BAM has more than one reference
+# bam_reads = "ref"          # one of: ref, ref+unal, all
+
+[run]
+threads = 4
+max_iterations = 20
+convergence_identity = 100.0
+convergence_streak = 1

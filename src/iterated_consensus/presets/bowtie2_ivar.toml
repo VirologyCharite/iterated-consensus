@@ -1,0 +1,50 @@
+# iterated-consensus preset: bowtie2 for mapping, ivar for consensus calling.
+#
+# Assumes paired-end input (mate1/mate2). If you also have unpaired reads,
+# add `-U {reads_single:,}` to map_cmd yourself -- it's left out here because
+# referencing {reads_single} when a run has no unpaired reads is an error.
+#
+# Fill in [input] below (delete whichever alternative you don't need), then:
+#   iterated-consensus run --config pipelines.toml --out-dir results/
+#
+# Placeholders available to every command:
+#   {reference}          current reference FASTA (the previous iteration's
+#                         consensus, or the starting reference for iteration 0)
+#   {index_prefix}        path prefix to build this mapper's index under
+#   {bam}                  path this mapper should write its BAM to
+#   {consensus_prefix}    path prefix for the consensus step's output
+#   {threads}              from [run] threads below
+#   {reads_1} / {reads_2} / {reads_single}
+#       read-file lists. Expand with {reads_1}, {reads_1:,}, {prefix:reads_1},
+#       {prefix:reads_1:sep}, or {cat:reads_1} (concatenate to one file) --
+#       see the README for the full templating syntax.
+
+[[mapper]]
+name = "bowtie2"
+index_cmd = ["bowtie2-build", "{reference}", "{index_prefix}"]
+map_cmd = "bowtie2 -x {index_prefix} -1 {reads_1:,} -2 {reads_2:,} -p {threads} --local | samtools sort -@ {threads} -o {bam}"
+
+[consensus]
+steps = [
+    "samtools mpileup -aa -A -d 0 -Q 0 -f {reference} {bam} | ivar consensus -p {consensus_prefix} -q 20 -t 0.5 -m 10",
+]
+output = "{consensus_prefix}.fa"
+
+[input]
+# --- FASTQ start ---
+# mate1 = ["reads_R1.fastq.gz"]
+# mate2 = ["reads_R2.fastq.gz"]
+# reference = "starting_reference.fasta"
+# # ...or fetch the starting reference from NCBI instead of a local file:
+# # accession = "NC_045512.2"
+
+# --- BAM start (use this instead of the FASTQ block above) ---
+# bam = "input.bam"
+# reference_name = "chr1"   # only needed if the BAM has more than one reference
+# bam_reads = "ref"          # one of: ref, ref+unal, all
+
+[run]
+threads = 4
+max_iterations = 20
+convergence_identity = 100.0
+convergence_streak = 1
