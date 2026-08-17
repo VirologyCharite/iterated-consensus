@@ -1,3 +1,7 @@
+# 0.1.2 August 18, 2026
+
+Updated `pyproject.toml`.
+
 # 0.1.1 August 18, 2026
 
 `reference_name` and `reference_id` unified into a single
