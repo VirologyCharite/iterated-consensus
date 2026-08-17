@@ -23,26 +23,22 @@ def list_references(bam_path: Path) -> list[str]:
         return list(bam.references)
 
 
-def resolve_reference_name(bam_path: Path, reference_name: str | None) -> str:
+def resolve_reference_name(bam_path: Path, reference_id: str | None) -> str:
     """Pick the single reference to call a consensus from.
 
     If the BAM has exactly one reference, it is used automatically.
-    Otherwise `reference_name` must be given and must match one of them.
+    Otherwise `reference_id` must be given and must match one of them.
     """
     refs = list_references(bam_path)
     if not refs:
         raise BamError(f"{bam_path} has no references in its header")
-    if reference_name is not None:
-        if reference_name not in refs:
-            raise BamError(
-                f"reference '{reference_name}' not found in {bam_path}; available: {refs}"
-            )
-        return reference_name
+    if reference_id is not None:
+        if reference_id not in refs:
+            raise BamError(f"reference '{reference_id}' not found in {bam_path}; available: {refs}")
+        return reference_id
     if len(refs) == 1:
         return refs[0]
-    raise BamError(
-        f"{bam_path} has multiple references {refs}; specify reference_name to pick one"
-    )
+    raise BamError(f"{bam_path} has multiple references {refs}; specify reference_id to pick one")
 
 
 def _ensure_indexed(bam_path: Path) -> None:

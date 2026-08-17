@@ -60,10 +60,6 @@ def run_cmd(
     bam: Annotated[
         Path | None, typer.Option(help="Starting BAM file (overrides [input].bam in the config).")
     ] = None,
-    reference_name: Annotated[
-        str | None,
-        typer.Option(help="Reference/contig in --bam to call a consensus from (needed if it has >1)."),
-    ] = None,
     bam_reads: Annotated[
         str | None,
         typer.Option(help="Reads to extract from --bam for remapping: ref, ref+unal, or all."),
@@ -81,7 +77,13 @@ def run_cmd(
         Path | None, typer.Option(help="Starting reference FASTA (FASTQ-start only).")
     ] = None,
     reference_id: Annotated[
-        str | None, typer.Option(help="Record ID within --reference, if it has multiple sequences.")
+        str | None,
+        typer.Option(
+            help=(
+                "Which sequence to use: a record ID within --reference if it has "
+                "multiple sequences, or a contig name within --bam if it has more than one."
+            )
+        ),
     ] = None,
     accession: Annotated[
         str | None,
@@ -99,7 +101,6 @@ def run_cmd(
             accession=accession,
             reference_id=reference_id,
             bam=bam,
-            reference_name=reference_name,
             bam_reads=bam_reads,  # type: ignore[arg-type]
         )
         config = replace(config, input=apply_input_overrides(config.input, overrides))

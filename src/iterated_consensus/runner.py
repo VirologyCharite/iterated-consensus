@@ -122,7 +122,7 @@ def _prepare_initial_state(config: Config, out_dir: Path) -> _InitialState:
     reads_dir = out_dir / "reads"
 
     if input_spec.bam is not None:
-        reference_name = resolve_reference_name(input_spec.bam, input_spec.reference_name)
+        reference_name = resolve_reference_name(input_spec.bam, input_spec.reference_id)
         extracted = extract_fastq(
             input_spec.bam,
             reference_name=reference_name,

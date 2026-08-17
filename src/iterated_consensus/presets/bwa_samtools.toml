@@ -35,7 +35,7 @@ output = "{consensus_prefix}.fa"
 
 # --- BAM start (use this instead of the FASTQ block above) ---
 # bam = "input.bam"
-# reference_name = "chr1"   # only needed if the BAM has more than one reference
+# reference_id = "chr1"     # only needed if the BAM has more than one reference
 # bam_reads = "ref"          # one of: ref, ref+unal, all
 
 [run]

@@ -43,7 +43,6 @@ class InputSpec:
     accession: str | None = None
     reference_id: str | None = None
     bam: Path | None = None
-    reference_name: str | None = None
     bam_reads: BamReadsMode = "ref"
 
     def validate(self) -> None:
@@ -66,14 +65,9 @@ class InputSpec:
                 raise ConfigError("specify reference or accession, not both")
             if self.reference is None and self.accession is None:
                 raise ConfigError("FASTQ input needs a starting reference (reference or accession)")
-            if self.reference_name is not None:
-                raise ConfigError("reference_name only applies when starting from a bam")
 
-        if have_bam:
-            if self.reference is not None or self.accession is not None:
-                raise ConfigError("reference/accession only apply when starting from FASTQ")
-            if self.reference_id is not None:
-                raise ConfigError("reference_id only applies when starting from FASTQ")
+        if have_bam and (self.reference is not None or self.accession is not None):
+            raise ConfigError("reference/accession only apply when starting from FASTQ")
 
         if self.bam_reads not in _VALID_BAM_READS_MODES:
             raise ConfigError(
@@ -92,7 +86,6 @@ class InputOverrides:
     accession: str | None = None
     reference_id: str | None = None
     bam: Path | None = None
-    reference_name: str | None = None
     bam_reads: BamReadsMode | None = None
 
 
@@ -112,9 +105,6 @@ def apply_input_overrides(base: InputSpec | None, overrides: InputOverrides) -> 
         accession=overrides.accession if overrides.accession is not None else base.accession,
         reference_id=overrides.reference_id if overrides.reference_id is not None else base.reference_id,
         bam=overrides.bam if overrides.bam is not None else base.bam,
-        reference_name=(
-            overrides.reference_name if overrides.reference_name is not None else base.reference_name
-        ),
         bam_reads=overrides.bam_reads if overrides.bam_reads is not None else base.bam_reads,
     )
     merged.validate()
@@ -212,7 +202,6 @@ def _parse_input(raw: dict) -> InputSpec:
         accession=raw.get("accession"),
         reference_id=raw.get("reference_id"),
         bam=Path(bam) if bam is not None else None,
-        reference_name=raw.get("reference_name"),
         bam_reads=raw.get("bam_reads", "ref"),
     )
 

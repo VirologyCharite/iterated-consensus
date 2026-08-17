@@ -1,14 +1,20 @@
-# iterated-consensus
+# Iterated consensus sequence
 
-Iteratively build a consensus sequence: call a consensus from a BAM (or an
-initial reference), build a mapper index from it, remap the original reads
-against it, call a new consensus, and repeat until the consensus stops
-changing.
+Iteratively build a consensus sequence: call a consensus from a BAM
+(or an initial reference), build a mapper index from it, remap the
+original reads against it, call a new consensus, and repeat until the
+consensus stops changing.
 
-Mapping and consensus-calling are both fully user-configurable via a TOML
-pipeline config -- you bring your own `bowtie2`/`bwa`/`minimap2`/... and
-`ivar`/`samtools`/... commands, iterated-consensus just drives the loop,
-tracks convergence, and writes the results.
+Mapping and consensus-calling are both fully user-configurable via a
+TOML pipeline config -- you bring your own
+`bowtie2`/`bwa`/`minimap2`/... and `ivar`/`samtools`/... commands,
+iterated-consensus just drives the loop, tracks convergence, and
+writes the results.
+
+The code here was written entirely by Claude Sonnet 5 (model ID
+`claude-sonnet-5`), from Anthropic's Claude 5 family. This took about
+3.5 hours from giving Claude an initial description, through planning
+and writing code, tests, and documentation.
 
 ## Install
 
@@ -60,7 +66,7 @@ reference = "starting_reference.fasta"        # or: accession = "NC_045512.2"
 # reference_id = "chr2"        # only if `reference` has >1 sequence
 # --- or, instead of the FASTQ block above, start from a BAM: ---
 # bam = "input.bam"
-# reference_name = "chr2"      # only if the BAM has >1 reference
+# reference_id = "chr2"        # only if the BAM has >1 reference (same key, a contig name here)
 # bam_reads = "ref"            # ref | ref+unal | all -- see below
 
 [run]

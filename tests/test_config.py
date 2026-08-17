@@ -47,13 +47,13 @@ def test_minimal_valid_config_with_bam_input() -> None:
     text = MAPPER + CONSENSUS + """
 [input]
 bam = "input.bam"
-reference_name = "chr2"
+reference_id = "chr2"
 bam_reads = "ref+unal"
 """
     config = parse_config(text)
     assert config.input is not None
     assert config.input.bam == Path("input.bam")
-    assert config.input.reference_name == "chr2"
+    assert config.input.reference_id == "chr2"
     assert config.input.bam_reads == "ref+unal"
 
 
