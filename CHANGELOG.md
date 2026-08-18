@@ -1,9 +1,23 @@
+# 0.2.5 August 19, 2026
+
+Allow output_dir in the config. Add `[tool-versions]` so the summary
+output can indicate version info. Make all config `[run]` variables
+available as placeholders in other parts of the config. Added
+iteration cycle detection. Improved `index.html` summary.
+
+# 0.2.4 August 18, 2026
+
+Made the `--progress` output have a header line instead of repeating
+the column names on each output line. The final consensus filename is
+now relative to the output directory (unless it is given as an
+absolute path).
+
 # 0.2.3 August 18, 2026
 
 Added config [output] section. Symlink iteration zero files when
-possible. Don't create anything when -n is given. Turn [run]
-variables into {name} placeholders that can be used elsewhere. Added
-better threads support (including 'auto').
+possible. Don't create anything when -n is given. Turn [run] variables
+into {name} placeholders that can be used elsewhere. Added better
+threads support (including 'auto').
 
 # 0.2.1 August 18, 2026
 

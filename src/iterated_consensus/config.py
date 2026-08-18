@@ -23,7 +23,10 @@ _VALID_BAM_READS_MODES = ("ref", "ref+unal", "all")
 # a custom {name} placeholder usable in mapper/consensus commands (see
 # Config.extra_vars).
 _KNOWN_RUN_KEYS = frozenset(
-    {"threads", "threads_reserve", "max_iterations", "convergence_identity", "convergence_streak"}
+    {
+        "threads", "threads_reserve", "max_iterations", "convergence_identity", "convergence_streak",
+        "output_dir",
+    }
 )
 
 # Placeholder names iterated-consensus fills in itself, once per iteration --
@@ -31,7 +34,10 @@ _KNOWN_RUN_KEYS = frozenset(
 # is _KNOWN_RUN_KEYS (all of which double as placeholders -- see runner.py)
 # plus the placeholders that aren't [run] keys at all.
 _RESERVED_PLACEHOLDER_NAMES = _KNOWN_RUN_KEYS | frozenset(
-    {"reference", "index_prefix", "bam", "consensus_prefix", "reads_1", "reads_2", "reads_single"}
+    {
+        "reference", "index_prefix", "bam", "consensus_prefix", "reads_1", "reads_2", "reads_single",
+        "consensus_fasta", "consensus_id",
+    }
 )
 
 
@@ -59,12 +65,19 @@ class Mapper:
     name: str
     index_cmd: CommandStep
     map_cmd: CommandStep
+    tool_versions: dict[str, CommandStep] = field(default_factory=dict)
+    """From this mapper's [tool-versions] sub-table, if given: tool name ->
+    a command whose stdout is that tool's version string. Run once per
+    iteration, immediately before index_cmd/map_cmd -- see runner.py."""
 
 
 @dataclass(frozen=True)
 class ConsensusSpec:
     steps: tuple[CommandStep, ...]
     output: str
+    tool_versions: dict[str, CommandStep] = field(default_factory=dict)
+    """From [consensus]'s [tool-versions] sub-table, if given -- see
+    Mapper.tool_versions above; run immediately before the consensus steps."""
 
 
 @dataclass(frozen=True)
@@ -110,12 +123,27 @@ class InputSpec:
 
 @dataclass(frozen=True)
 class OutputSpec:
-    consensus_fasta: Path | None = None
+    consensus_fasta: str | None = None
+    """A template string, not a plain path -- rendered against the usual
+    [run] placeholders (plus {consensus_id}) before use, so it can reference
+    {output_dir} (or anything else) to control where it lands. A relative
+    result is *not* auto-placed under the output directory: it's just a
+    normal relative path, resolved against the current working directory
+    like any other file argument. Use "{output_dir}/..." explicitly to put
+    it under --output-dir."""
     consensus_id: str | None = None
+    commands: tuple[CommandStep, ...] = ()
+    """Run once, after consensus_fasta is written, in order. {consensus_fasta}
+    and {consensus_id} are available as placeholders (alongside every other
+    placeholder [run] commands can use), resolved to the final values --
+    the actual id used, even if consensus_id itself was left unset and the
+    consensus tool's own id was kept."""
 
     def validate(self) -> None:
         if self.consensus_id is not None and self.consensus_fasta is None:
             raise ConfigError("[output] consensus_id needs consensus_fasta to also be given")
+        if self.commands and self.consensus_fasta is None:
+            raise ConfigError("[output] commands needs consensus_fasta to also be given")
 
 
 @dataclass(frozen=True)
@@ -160,6 +188,10 @@ class Config:
     consensus: ConsensusSpec
     input: InputSpec | None = None
     output: OutputSpec | None = None
+    output_dir: Path | None = None
+    """Fallback for --output-dir: used only when the CLI flag isn't given.
+    Also available as the {output_dir} placeholder in every command, set to
+    whichever of the two actually applies."""
     threads: int = 1
     threads_reserve: int = 0
     """Only meaningful (and only settable) alongside threads = "auto" -- see
@@ -214,6 +246,15 @@ def _command_step(value: object, where: str) -> CommandStep:
     raise ConfigError(f"{where} must be a string or a list of strings, got {value!r}")
 
 
+def _parse_tool_versions(raw: dict, where: str) -> dict[str, CommandStep]:
+    tv_raw = raw.get("tool-versions", {})
+    if not isinstance(tv_raw, dict):
+        raise ConfigError(f"{where} [tool-versions] must be a table")
+    return {
+        name: _command_step(cmd, f"{where} [tool-versions] '{name}'") for name, cmd in tv_raw.items()
+    }
+
+
 def _paths(value: object, where: str) -> tuple[Path, ...]:
     if value is None:
         return ()
@@ -238,6 +279,7 @@ def _parse_mapper(raw: dict, index: int) -> Mapper:
         name=name,
         index_cmd=_command_step(index_cmd, f"mapper '{name}' index_cmd"),
         map_cmd=_command_step(map_cmd, f"mapper '{name}' map_cmd"),
+        tool_versions=_parse_tool_versions(raw, f"mapper '{name}'"),
     )
 
 
@@ -249,7 +291,7 @@ def _parse_consensus(raw: dict) -> ConsensusSpec:
     output = raw.get("output", "")
     if not isinstance(output, str):
         raise ConfigError("[consensus] output must be a string")
-    return ConsensusSpec(steps=steps, output=output)
+    return ConsensusSpec(steps=steps, output=output, tool_versions=_parse_tool_versions(raw, "[consensus]"))
 
 
 def _parse_input(raw: dict) -> InputSpec:
@@ -268,9 +310,16 @@ def _parse_input(raw: dict) -> InputSpec:
 
 def _parse_output(raw: dict) -> OutputSpec:
     consensus_fasta = raw.get("consensus_fasta")
+    if consensus_fasta is not None and not isinstance(consensus_fasta, str):
+        raise ConfigError(f"[output] consensus_fasta must be a string, got {consensus_fasta!r}")
+    commands_raw = raw.get("commands", [])
+    if not isinstance(commands_raw, list):
+        raise ConfigError("[output] commands must be a list")
+    commands = tuple(_command_step(c, f"[output] commands[{i}]") for i, c in enumerate(commands_raw))
     return OutputSpec(
-        consensus_fasta=Path(consensus_fasta) if consensus_fasta is not None else None,
+        consensus_fasta=consensus_fasta,
         consensus_id=raw.get("consensus_id"),
+        commands=commands,
     )
 
 
@@ -290,6 +339,15 @@ def _resolve_threads(run_raw: dict) -> int:
     if not isinstance(value, int) or isinstance(value, bool):
         raise ConfigError(f'[run] threads must be an integer or "auto", got {value!r}')
     return value
+
+
+def _parse_output_dir(run_raw: dict) -> Path | None:
+    value = run_raw.get("output_dir")
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ConfigError(f"[run] output_dir must be a string, got {value!r}")
+    return Path(value)
 
 
 def _parse_run_extras(run_raw: dict) -> dict[str, str | int | float | bool]:
@@ -337,6 +395,7 @@ def parse_config(text: str) -> Config:
         consensus=consensus,
         input=input_spec,
         output=output_spec,
+        output_dir=_parse_output_dir(run_raw),
         threads=_resolve_threads(run_raw),
         threads_reserve=run_raw.get("threads_reserve", 0),  # validated inside _resolve_threads above
         extra_vars=_parse_run_extras(run_raw),

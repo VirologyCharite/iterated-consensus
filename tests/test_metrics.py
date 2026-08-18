@@ -1,3 +1,5 @@
+import hashlib
+
 import pytest
 
 from iterated_consensus.metrics import (
@@ -5,6 +7,7 @@ from iterated_consensus.metrics import (
     base_composition,
     check_convergence,
     sequence_identity,
+    sequence_md5,
 )
 
 
@@ -78,3 +81,19 @@ def test_base_composition_counts_and_uppercases() -> None:
 
 def test_base_composition_empty_sequence() -> None:
     assert base_composition("") == {}
+
+
+def test_sequence_md5_matches_uppercase_no_whitespace_hash() -> None:
+    assert sequence_md5("ACGT") == hashlib.md5(b"ACGT", usedforsecurity=False).hexdigest()
+
+
+def test_sequence_md5_is_case_insensitive() -> None:
+    assert sequence_md5("acgt") == sequence_md5("ACGT")
+
+
+def test_sequence_md5_ignores_whitespace() -> None:
+    assert sequence_md5("AC\nGT\n") == sequence_md5("ACGT")
+
+
+def test_sequence_md5_differs_for_different_sequences() -> None:
+    assert sequence_md5("ACGT") != sequence_md5("ACGA")

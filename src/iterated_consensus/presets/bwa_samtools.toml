@@ -14,7 +14,7 @@
 #
 # Assumes paired-end input. Fill in [input] below (delete whichever
 # alternative you don't need), then:
-#   iterated-consensus run --config pipelines.toml --out-dir results/
+#   iterated-consensus run --config pipelines.toml --output-dir results/
 #
 # See bowtie2_ivar.toml (or the README) for the full placeholder/templating
 # reference.
@@ -24,12 +24,20 @@ name = "bwa"
 index_cmd = ["bwa", "index", "-p", "{index_prefix}", "{reference}"]
 map_cmd = "bwa mem -t {map_threads} {index_prefix} {cat:reads_1} {cat:reads_2} | samtools sort -@ {sort_threads} -o {bam}"
 
+[mapper.tool-versions]
+# Optional: recorded once per iteration and shown in index.html, flagged
+# prominently if it ever changes mid-run -- see the README's "Tool versions".
+# bwa = "bwa 2>&1 | grep -m1 Version | cut -f2 -d' '"
+
 [consensus]
 steps = [
     "samtools index {bam}",
     "samtools consensus -a -f fasta -o {consensus_prefix}.fa {bam}",
 ]
 output = "{consensus_prefix}.fa"
+
+[consensus.tool-versions]
+# samtools = "samtools --version | head -n 1 | cut -f2 -d' '"
 
 [input]
 # --- FASTQ start ---
@@ -54,12 +62,20 @@ output = "{consensus_prefix}.fa"
 # Optional: copy the last iteration's consensus out to a location/name of
 # your choosing once the run finishes, converged or not. Leave this whole
 # section out if you're happy just reading iter_NNN/consensus.fasta
-# directly from --out-dir.
-# consensus_fasta = "final_consensus.fasta"   # where to copy it to
+# directly from --output-dir.
+# consensus_fasta = "{output_dir}/final_consensus.fasta"   # where to copy
+#   it to -- a template, rendered with {output_dir} and every other
+#   placeholder below; a relative result (e.g. leaving {output_dir}/ off) is
+#   relative to the cwd, NOT --output-dir, unless you reference it yourself
 # consensus_id = "my-sample-name"              # optional -- the FASTA header
 #   to give it; if omitted, keeps whatever id the consensus tool itself used
+# commands = ["samtools faidx {consensus_fasta}"]   # optional -- run once
+#   consensus_fasta is written; also sees {consensus_id} and every other
+#   placeholder available to mapper/consensus commands (e.g. {threads})
 
 [run]
+# output_dir = "results/"      # fallback for --output-dir; the CLI flag
+                                # wins if both are given
 threads = 4                    # or "auto" -- see the README
 max_iterations = 20
 convergence_identity = 100.0

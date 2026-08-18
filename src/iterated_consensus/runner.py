@@ -54,8 +54,15 @@ from .bam import (
     get_reference_length,
     resolve_reference_name,
 )
-from .commands import RenderedCommand, render_command, run_command
-from .config import Config, ConsensusSpec, InputSpec, OutputSpec
+from .commands import (
+    CommandError,
+    CommandRun,
+    RenderedCommand,
+    render_command,
+    run_logged_command,
+    run_tool_version_command,
+)
+from .config import Config, ConsensusSpec, InputSpec
 from .consensus import ConsensusResult, run_consensus
 from .errors import IteratedConsensusError
 from .metrics import (
@@ -63,6 +70,7 @@ from .metrics import (
     base_composition,
     check_convergence,
     sequence_identity,
+    sequence_md5,
 )
 from .reads import ReadsCatCache
 from .reference import (
@@ -76,7 +84,7 @@ from .reference import (
     write_fasta,
 )
 from .report import write_report
-from .templating import ReadsList
+from .templating import ReadsList, render
 
 
 class RunnerError(IteratedConsensusError, RuntimeError):
@@ -90,6 +98,28 @@ class IterationRecord:
     consensus_length: int
     identity_to_previous: float | None
     elapsed_seconds: float
+    consensus_md5: str | None = None
+    """MD5 of the consensus sequence (case-normalized, whitespace stripped --
+    see metrics.sequence_md5), so identical sequences from different runs
+    (or the same run repeated) are easy to confirm at a glance. Defaults to
+    None only so summary.json written before this field existed can still be
+    resumed; every freshly-computed record always sets it."""
+
+
+@dataclass(frozen=True)
+class CycleInfo:
+    """A later iteration's consensus turned out identical (by MD5) to an
+    earlier one -- the run is oscillating among a set of sequences rather
+    than converging on one, so it was stopped rather than run to
+    max_iterations chasing a fixed point that doesn't exist."""
+
+    first_iteration: int
+    repeat_iteration: int
+    consensus_md5: str
+
+    @property
+    def period(self) -> int:
+        return self.repeat_iteration - self.first_iteration
 
 
 @dataclass(frozen=True)
@@ -98,6 +128,15 @@ class RunResult:
     iterations: tuple[IterationRecord, ...]
     converged: bool
     total_elapsed_seconds: float
+    final_consensus_path: Path | None = None
+    """Where [output].consensus_fasta was actually written, if it's set --
+    resolved relative to output_dir, same as _write_final_output."""
+    cycle: CycleInfo | None = None
+    """Set if the run stopped because a cycle was detected, rather than
+    converging or hitting max_iterations. When set, the *first* occurrence
+    of the repeated consensus (cycle.first_iteration) -- not the last
+    iteration actually run -- is what final_consensus_path/[output] and the
+    report's "final" stats are based on; see _final_iteration_number."""
 
 
 @dataclass(frozen=True)
@@ -106,12 +145,16 @@ class DryRunPreview:
     note: str
 
 
-def _run_level_values(config: Config) -> dict[str, object]:
+def _run_level_values(config: Config, out_dir: Path) -> dict[str, object]:
     """[run] values usable as {name} placeholders in every command.
 
     Custom [run] variables (config.extra_vars) come first so the dedicated
     fields below always win on a name clash -- defense in depth only, since
     Config.validate already rejects that clash at config-load time.
+
+    `out_dir` is the effective output directory -- whichever of --output-dir
+    or [run].output_dir actually applied -- not necessarily config.output_dir
+    itself, which is only a fallback the CLI may or may not have used.
     """
     return {
         **config.extra_vars,
@@ -120,6 +163,7 @@ def _run_level_values(config: Config) -> dict[str, object]:
         "max_iterations": config.max_iterations,
         "convergence_identity": config.convergence_identity,
         "convergence_streak": config.convergence_streak,
+        "output_dir": str(out_dir),
     }
 
 
@@ -347,24 +391,32 @@ def _plan_mapping(
     return steps, bam_path
 
 
+@dataclass(frozen=True)
+class _MappingRunResult:
+    bam_path: Path
+    tool_versions: dict[str, str]
+    commands: tuple[CommandRun, ...]
+
+
 def _run_mapping(
     config: Config,
     iter_dir: Path,
     base_values: dict[str, object],
     cat_cache: ReadsCatCache,
-    *,
-    log: bool,
-) -> Path:
+) -> _MappingRunResult:
     steps, bam_path = _plan_mapping(config, iter_dir, base_values, cat_cache)
-    for step in steps:
-        run_command(
-            step.index_rendered,
-            log_path=(iter_dir / "logs" / f"{step.mapper_name}_index.log") if log else None,
-        )
-        run_command(
-            step.map_rendered,
-            log_path=(iter_dir / "logs" / f"{step.mapper_name}_map.log") if log else None,
-        )
+    log_dir = iter_dir / "logs"
+    tool_versions: dict[str, str] = {}
+    commands: list[CommandRun] = []
+    for mapper, step in zip(config.mappers, steps, strict=True):
+        for name, tv_step in mapper.tool_versions.items():
+            try:
+                tool_versions[name] = run_tool_version_command(tv_step, base_values)
+            except CommandError as exc:
+                raise RunnerError(f"mapper '{mapper.name}' tool-versions '{name}' failed: {exc}") from exc
+
+        commands.append(run_logged_command(f"{step.mapper_name}_index", step.index_rendered, log_dir))
+        commands.append(run_logged_command(f"{step.mapper_name}_map", step.map_rendered, log_dir))
 
     if len(steps) > 1:
         pysam.merge("-f", str(bam_path), *(str(s.bam_path) for s in steps))
@@ -372,7 +424,7 @@ def _run_mapping(
     # Mapper commands don't always leave a .bam.bai behind; several
     # consensus tools (e.g. `samtools consensus`) require one.
     ensure_indexed(bam_path)
-    return bam_path
+    return _MappingRunResult(bam_path=bam_path, tool_versions=tool_versions, commands=tuple(commands))
 
 
 def _write_iteration_stats(
@@ -381,56 +433,125 @@ def _write_iteration_stats(
     reads_mapped: int,
     identity: float | None,
     elapsed: float,
+    consensus_md5: str,
+    tool_versions: dict[str, str],
+    commands: list[CommandRun],
 ) -> None:
     stats = {
         "reads_mapped": reads_mapped,
         "consensus_length": consensus_result.length,
         "identity_to_previous": identity,
         "elapsed_seconds": elapsed,
+        "consensus_md5": consensus_md5,
         "composition": base_composition(consensus_result.sequence),
+        "tool_versions": tool_versions,
+        "commands": [asdict(c) for c in commands],
     }
     (iter_dir / "stats.json").write_text(json.dumps(stats, indent=2))
 
 
 def _write_metrics_tsv(out_dir: Path, records: list[IterationRecord]) -> None:
-    lines = ["iteration\treads_mapped\tconsensus_length\tidentity_to_previous\telapsed_seconds"]
+    lines = [
+        "iteration\treads_mapped\tconsensus_length\tidentity_to_previous\telapsed_seconds\tconsensus_md5"
+    ]
     for r in records:
         identity = "" if r.identity_to_previous is None else f"{r.identity_to_previous:.4f}"
         lines.append(
             f"{r.iteration}\t{r.reads_mapped}\t{r.consensus_length}\t{identity}\t"
-            f"{r.elapsed_seconds:.3f}"
+            f"{r.elapsed_seconds:.3f}\t{r.consensus_md5 or ''}"
         )
     (out_dir / "metrics.tsv").write_text("\n".join(lines) + "\n")
 
 
+def _final_iteration_number(records: list[IterationRecord], cycle: CycleInfo | None) -> int:
+    """Which iteration counts as "the" result: the first occurrence of a
+    repeated consensus if a cycle was detected (that's the representative
+    of the whole repeating set), otherwise simply the last iteration run."""
+    return cycle.first_iteration if cycle is not None else records[-1].iteration
+
+
+def _detect_cycle(records: list[IterationRecord]) -> CycleInfo | None:
+    """Whether any iteration's consensus_md5 repeats an earlier one, scanning
+    in order -- used both live (checked once per new iteration, seeded with
+    the iterations already run) and when resuming (checked over the whole
+    history at once, in case a prior run stopped at max_iterations without
+    ever comparing non-adjacent iterations against each other)."""
+    seen: dict[str, int] = {}
+    for r in records:
+        if r.consensus_md5 is None:
+            continue
+        if r.consensus_md5 in seen:
+            return CycleInfo(
+                first_iteration=seen[r.consensus_md5],
+                repeat_iteration=r.iteration,
+                consensus_md5=r.consensus_md5,
+            )
+        seen[r.consensus_md5] = r.iteration
+    return None
+
+
 def _write_summary_json(
-    out_dir: Path, records: list[IterationRecord], converged: bool, total_elapsed: float
+    out_dir: Path,
+    records: list[IterationRecord],
+    converged: bool,
+    total_elapsed: float,
+    output_commands: tuple[CommandRun, ...] = (),
+    cycle: CycleInfo | None = None,
 ) -> None:
     summary = {
         "iterations_run": len(records),
         "converged": converged,
         "total_elapsed_seconds": total_elapsed,
         "iterations": [asdict(r) for r in records],
+        "output_commands": [asdict(c) for c in output_commands],
+        "cycle": asdict(cycle) if cycle is not None else None,
+        "final_iteration": _final_iteration_number(records, cycle),
     }
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
 
 
-def _write_final_output(output: OutputSpec | None, out_dir: Path, last_iteration: int) -> None:
-    """Copy the last iteration's consensus.fasta to `[output].consensus_fasta`, if set.
+def _write_final_output(
+    config: Config, out_dir: Path, last_iteration: int
+) -> tuple[Path | None, tuple[CommandRun, ...]]:
+    """Copy the last iteration's consensus.fasta to `[output].consensus_fasta`, if
+    set, then run `[output].commands` against it, if any are given.
 
-    Always a real copy, never a symlink like reference_initial.fasta can be:
-    this is meant to be a small, standalone, portable deliverable, not a
-    reference back into out_dir's own working files.
+    consensus_fasta is a template, rendered against the usual [run]
+    placeholders (plus {consensus_id}) -- most notably {output_dir}, since a
+    relative path is *not* auto-placed under out_dir: it's just a normal
+    relative path, resolved against the current working directory like any
+    other file argument. The copy itself is always a real copy, never a
+    symlink like reference_initial.fasta can be: this is meant to be a
+    small, standalone, portable deliverable, not a reference back into
+    out_dir's own working files.
     """
+    output = config.output
     if output is None or output.consensus_fasta is None:
-        return
+        return None, ()
     consensus_path = out_dir / f"iter_{last_iteration:03d}" / "consensus.fasta"
     record = parse_fasta(consensus_path.read_text())[0]
     record_id = output.consensus_id if output.consensus_id is not None else record.id
+
+    values: dict[str, object] = {**_run_level_values(config, out_dir), "consensus_id": record_id}
+    final_path = Path(render(output.consensus_fasta, values))
     try:
-        write_fasta(output.consensus_fasta, record_id, record.sequence)
+        write_fasta(final_path, record_id, record.sequence)
     except OSError as exc:
-        raise RunnerError(f"could not write [output].consensus_fasta '{output.consensus_fasta}': {exc}") from exc
+        raise RunnerError(f"could not write [output].consensus_fasta '{final_path}': {exc}") from exc
+
+    commands: list[CommandRun] = []
+    if output.commands:
+        command_values = {**values, "consensus_fasta": str(final_path)}
+        log_dir = out_dir / "logs"
+        for i, step in enumerate(output.commands):
+            rendered = render_command(step, command_values)
+            name = f"output_command_{i:02d}"
+            try:
+                commands.append(run_logged_command(name, rendered, log_dir))
+            except CommandError as exc:
+                raise RunnerError(f"[output] command {i} failed: {exc}") from exc
+
+    return final_path, tuple(commands)
 
 
 @dataclass(frozen=True)
@@ -442,6 +563,7 @@ class _ResumeState:
     converged: bool
     records: list[IterationRecord]
     total_elapsed_seconds: float
+    cycle: CycleInfo | None
 
 
 def _load_resume_state(out_dir: Path, config: Config) -> _ResumeState | None:
@@ -492,6 +614,10 @@ def _load_resume_state(out_dir: Path, config: Config) -> _ResumeState | None:
         converged=converged,
         records=list(old_records),
         total_elapsed_seconds=summary["total_elapsed_seconds"],
+        # Recomputed from the records themselves, not read back from the
+        # summary's own "cycle" key -- so a summary.json written before this
+        # feature existed still gets retroactively checked.
+        cycle=_detect_cycle(old_records),
     )
 
 
@@ -511,14 +637,25 @@ def run(
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     resume = _load_resume_state(out_dir, config)
-    if resume is not None and resume.converged:
+    if resume is not None and (resume.converged or resume.cycle is not None):
+        final_iteration = _final_iteration_number(resume.records, resume.cycle)
+        final_consensus_path, output_commands = _write_final_output(config, out_dir, final_iteration)
+        _write_summary_json(
+            out_dir,
+            resume.records,
+            resume.converged,
+            resume.total_elapsed_seconds,
+            output_commands,
+            resume.cycle,
+        )
         write_report(out_dir)
-        _write_final_output(config.output, out_dir, resume.records[-1].iteration)
         return RunResult(
             output_dir=out_dir,
             iterations=tuple(resume.records),
-            converged=True,
+            converged=resume.converged,
             total_elapsed_seconds=resume.total_elapsed_seconds,
+            final_consensus_path=final_consensus_path,
+            cycle=resume.cycle,
         )
 
     cat_cache = ReadsCatCache(out_dir / "reads")
@@ -542,6 +679,10 @@ def run(
         prior_elapsed = 0.0
 
     converged = False
+    cycle: CycleInfo | None = None
+    seen_md5: dict[str, int] = {
+        r.consensus_md5: r.iteration for r in records if r.consensus_md5 is not None
+    }
     run_start = time.monotonic()
 
     for iteration in range(start_iteration, config.max_iterations + 1):
@@ -549,19 +690,24 @@ def run(
         t0 = time.monotonic()
         needs_mapping = state.iteration_0_needs_mapping or iteration >= 1
 
+        iteration_tool_versions: dict[str, str] = {}
+        iteration_commands: list[CommandRun] = []
         if needs_mapping:
             base_values: dict[str, object] = {
-                **_run_level_values(config),
+                **_run_level_values(config, out_dir),
                 "reference": str(current_reference_path),
                 **state.reads_values,
             }
-            current_bam_path = _run_mapping(config, iter_dir, base_values, cat_cache, log=True)
+            mapping_result = _run_mapping(config, iter_dir, base_values, cat_cache)
+            current_bam_path = mapping_result.bam_path
+            iteration_tool_versions.update(mapping_result.tool_versions)
+            iteration_commands.extend(mapping_result.commands)
 
         assert current_bam_path is not None
         reads_mapped = count_mapped_reads(current_bam_path)
 
         consensus_values: dict[str, object] = {
-            **_run_level_values(config),
+            **_run_level_values(config, out_dir),
             "bam": str(current_bam_path),
             "consensus_prefix": str(iter_dir / "consensus"),
         }
@@ -576,21 +722,34 @@ def run(
         )
         consensus_copy = iter_dir / "consensus.fasta"
         write_fasta(consensus_copy, consensus_result.record_id, consensus_result.sequence)
+        iteration_tool_versions.update(consensus_result.tool_versions)
+        iteration_commands.extend(consensus_result.commands)
 
         identity: float | None = None
         if previous_sequence is not None:
             identity = sequence_identity(previous_sequence, consensus_result.sequence).identity
 
         elapsed = time.monotonic() - t0
+        consensus_md5 = sequence_md5(consensus_result.sequence)
         record = IterationRecord(
             iteration=iteration,
             reads_mapped=reads_mapped,
             consensus_length=consensus_result.length,
             identity_to_previous=identity,
             elapsed_seconds=elapsed,
+            consensus_md5=consensus_md5,
         )
         records.append(record)
-        _write_iteration_stats(iter_dir, consensus_result, reads_mapped, identity, elapsed)
+        _write_iteration_stats(
+            iter_dir,
+            consensus_result,
+            reads_mapped,
+            identity,
+            elapsed,
+            consensus_md5,
+            iteration_tool_versions,
+            iteration_commands,
+        )
         if on_iteration is not None:
             on_iteration(record)
 
@@ -602,28 +761,43 @@ def run(
                 state=convergence_state,
             )
 
+        # A period-1 cycle (identical to the immediately preceding iteration)
+        # is exactly what convergence_identity=100 already catches above --
+        # this is specifically for non-adjacent repeats (period >= 2), e.g.
+        # oscillating between two different sequences.
+        if not converged and consensus_md5 in seen_md5:
+            cycle = CycleInfo(
+                first_iteration=seen_md5[consensus_md5], repeat_iteration=iteration, consensus_md5=consensus_md5
+            )
+        else:
+            seen_md5.setdefault(consensus_md5, iteration)
+
         previous_sequence = consensus_result.sequence
         current_reference_path = consensus_copy
 
-        if converged:
+        if converged or cycle is not None:
             break
 
     total_elapsed = prior_elapsed + (time.monotonic() - run_start)
+    final_iteration = _final_iteration_number(records, cycle)
+    final_consensus_path, output_commands = _write_final_output(config, out_dir, final_iteration)
     _write_metrics_tsv(out_dir, records)
-    _write_summary_json(out_dir, records, converged, total_elapsed)
+    _write_summary_json(out_dir, records, converged, total_elapsed, output_commands, cycle)
     write_report(out_dir)
-    _write_final_output(config.output, out_dir, records[-1].iteration)
     return RunResult(
         output_dir=out_dir,
         iterations=tuple(records),
         converged=converged,
+        cycle=cycle,
         total_elapsed_seconds=total_elapsed,
+        final_consensus_path=final_consensus_path,
     )
 
 
 def _preview_iteration(
     config: Config,
     iter_dir: Path,
+    out_dir: Path,
     *,
     needs_mapping: bool,
     reference_path: Path | None,
@@ -636,23 +810,27 @@ def _preview_iteration(
 
     if needs_mapping:
         base_values: dict[str, object] = {
-            **_run_level_values(config),
+            **_run_level_values(config, out_dir),
             "reference": str(reference_path),
             **reads_values,
         }
         steps, bam_path = _plan_mapping(config, iter_dir, base_values, cat_cache)
-        for step in steps:
+        for mapper, step in zip(config.mappers, steps, strict=True):
+            for tv_step in mapper.tool_versions.values():
+                lines.append(render_command(tv_step, base_values).display)
             lines.append(step.index_rendered.display)
             lines.append(step.map_rendered.display)
 
     assert bam_path is not None
     consensus_values: dict[str, object] = {
-        **_run_level_values(config),
+        **_run_level_values(config, out_dir),
         "bam": str(bam_path),
         "consensus_prefix": str(iter_dir / "consensus"),
     }
     if reference_path is not None:
         consensus_values["reference"] = str(reference_path)
+    for tv_step in config.consensus.tool_versions.values():
+        lines.append(render_command(tv_step, consensus_values).display)
     for step in config.consensus.steps:
         rendered = render_command(step, consensus_values, cat_resolver=cat_cache.resolve)
         lines.append(rendered.display)
@@ -677,6 +855,7 @@ def preview(config: Config, out_dir: Path) -> DryRunPreview:
     lines0 = _preview_iteration(
         config,
         iter0_dir,
+        out_dir,
         needs_mapping=state.iteration_0_needs_mapping,
         reference_path=state.reference_path,
         bam_path=state.starting_bam,
@@ -688,6 +867,7 @@ def preview(config: Config, out_dir: Path) -> DryRunPreview:
     lines1 = _preview_iteration(
         config,
         iter1_dir,
+        out_dir,
         needs_mapping=True,
         reference_path=iter0_dir / "consensus.fasta",
         bam_path=None,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections import Counter
 from dataclasses import dataclass
@@ -58,3 +59,11 @@ def check_convergence(
 def base_composition(seq: str) -> dict[str, int]:
     """Count of each character (base/ambiguity code/gap) in a sequence."""
     return dict(Counter(seq.upper()))
+
+
+def sequence_md5(seq: str) -> str:
+    """Hex-digest MD5 of a sequence, case-normalized and with no whitespace --
+    the convention used by NCBI/ENA for sequence checksums, so it's directly
+    comparable to hashes computed elsewhere, not just within this tool."""
+    normalized = "".join(seq.split()).upper()
+    return hashlib.md5(normalized.encode("ascii"), usedforsecurity=False).hexdigest()

@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from .commands import CommandError, RenderedCommand, render_command, run_command
+from .commands import (
+    CommandError,
+    CommandRun,
+    RenderedCommand,
+    render_command,
+    run_command,
+    run_logged_command,
+    run_tool_version_command,
+)
 from .config import ConsensusSpec
 from .errors import IteratedConsensusError
 from .metrics import base_composition
@@ -25,6 +33,8 @@ class ConsensusResult:
     sequence: str
     length: int
     composition: dict[str, int]
+    tool_versions: dict[str, str] = field(default_factory=dict)
+    commands: tuple[CommandRun, ...] = ()
 
 
 def render_consensus_steps(
@@ -43,11 +53,22 @@ def run_consensus(
     log_dir: Path | None = None,
     cat_resolver: CatResolver | None = None,
 ) -> ConsensusResult:
+    tool_versions: dict[str, str] = {}
+    for name, step in spec.tool_versions.items():
+        try:
+            tool_versions[name] = run_tool_version_command(step, values)
+        except CommandError as exc:
+            raise ConsensusError(f"[consensus] tool-versions '{name}' failed: {exc}") from exc
+
+    commands: list[CommandRun] = []
     for i, step in enumerate(spec.steps):
         rendered = render_command(step, values, cat_resolver=cat_resolver)
-        log_path = None if log_dir is None else log_dir / f"consensus_step_{i:02d}.log"
+        name = f"consensus_step_{i:02d}"
         try:
-            run_command(rendered, log_path=log_path)
+            if log_dir is None:
+                run_command(rendered)
+            else:
+                commands.append(run_logged_command(name, rendered, log_dir))
         except CommandError as exc:
             raise ConsensusError(f"consensus step {i} failed: {exc}") from exc
 
@@ -79,4 +100,6 @@ def run_consensus(
         sequence=record.sequence,
         length=len(record.sequence),
         composition=base_composition(record.sequence),
+        tool_versions=tool_versions,
+        commands=tuple(commands),
     )

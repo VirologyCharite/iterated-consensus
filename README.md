@@ -31,14 +31,21 @@ uv add iterated-consensus     # or: pip install iterated-consensus
 iterated-consensus config-template                  # list bundled presets
 iterated-consensus config-template bowtie2-ivar > pipelines.toml
 # edit pipelines.toml: fill in [input], adjust commands/threads as needed
-iterated-consensus run --config pipelines.toml --out-dir results/ --dry-run  # preview
-iterated-consensus run --config pipelines.toml --out-dir results/ --progress
+iterated-consensus run --config pipelines.toml --output-dir results/ --dry-run  # preview
+iterated-consensus run --config pipelines.toml --output-dir results/ --progress
 ```
 
 `--progress` prints a one-line summary after each iteration (reads mapped,
-consensus length, identity to the previous consensus, time taken). Every run
-also writes `results/index.html` -- open it in a browser for a summary and
-full per-iteration detail, no `--progress` needed.
+consensus length, identity to the previous consensus, time taken, and the
+consensus sequence's MD5 -- handy for confirming at a glance that two
+iterations (or two separate runs) produced byte-for-byte the same sequence).
+Every run also writes `results/index.html` -- open it in a browser for a
+summary and full per-iteration detail, no `--progress` needed.
+
+`--output-dir` can be left off the command line if the config sets
+`[run].output_dir` instead (the flag wins if both are given) -- handy for a
+config that's meant to always write to the same place. Giving neither is a
+config error.
 
 Errors (bad config, a failing command, a mismatched reference, ...) normally
 print a short `error: ...` message. Add `--traceback` to instead let them
@@ -59,11 +66,19 @@ map_cmd = "bowtie2 -x {index_prefix} -1 {reads_1:,} -2 {reads_2:,} -p {threads} 
 # configured, every mapper runs each iteration and their BAMs are merged
 # before the consensus step sees them.
 
+[mapper.tool-versions]
+# Optional -- see "Tool versions" below. Attaches to the [[mapper]] table
+# immediately above it.
+bowtie2 = "bowtie2 --version | head -n 1 | cut -f3 -d' '"
+
 [consensus]
 steps = [
     "samtools mpileup -aa -A -d 0 -Q 0 -f {reference} {bam} | ivar consensus -p {consensus_prefix} -t 0.5",
 ]
 output = "{consensus_prefix}.fa"   # where to find the result -- see note below
+
+[consensus.tool-versions]
+ivar = "ivar version | head -n 1 | cut -f3 -d' '"
 
 [input]
 reads_1 = ["a_R1.fastq.gz", "b_R1.fastq.gz"]  # 0 or more paired sets
@@ -79,16 +94,23 @@ reference_fasta = "starting_reference.fasta"  # a local file...
 
 [output]
 # consensus_fasta = "final_consensus.fasta"   # copy the last iteration's
-#   consensus here once the run finishes, converged or not -- see below
+#   consensus here once the run finishes, converged or not -- a relative
+#   path here is relative to the cwd, NOT --output-dir; use
+#   "{output_dir}/final_consensus.fasta" to put it under --output-dir. See
+#   below.
 # consensus_id = "my-sample-name"              # optional new FASTA header
+# commands = ["samtools faidx {consensus_fasta}"]   # optional -- run once
+#   consensus_fasta is written; {consensus_fasta}/{consensus_id} available
 
 [run]
-threads = 4                    # or "auto" -- see "Threads and custom [run]
-                                # variables" below
+# output_dir = "results/"          # fallback for --output-dir; the CLI flag
+                                    # wins if both are given
+threads = 4                        # or "auto" -- see "Threads and custom
+                                    # [run] variables" below
 max_iterations = 20
-convergence_identity = 100.0   # stop once consensus identity to the previous
-                                # iteration reaches this percent...
-convergence_streak = 1         # ...for this many iterations in a row
+convergence_identity = 100.0       # stop once consensus identity to the
+                                    # previous iteration reaches this percent...
+convergence_streak = 1             # ...for this many iterations in a row
 
 # Anything else here becomes a {name} placeholder in every command, e.g.:
 # min_depth = 10               # -> {min_depth} in [consensus] steps
@@ -112,6 +134,41 @@ fixed-name copy, not the path `output` pointed to, that later becomes
 pattern produces a different filename or extension: `output` only has to
 match what your consensus tool actually writes, nothing downstream reads
 that path directly.
+
+### Tool versions: `[mapper.tool-versions]` and `[consensus.tool-versions]`
+
+Optional sub-tables -- `[mapper.tool-versions]` attaches to whichever
+`[[mapper]]` table comes immediately before it (so with more than one
+mapper, give each its own); `[consensus.tool-versions]` attaches to
+`[consensus]`. Each entry maps a name you choose to a command whose stdout
+is that tool's version:
+
+```toml
+[mapper.tool-versions]
+bowtie2 = "bowtie2 --version | head -n 1 | cut -f3 -d' '"
+
+[consensus.tool-versions]
+ivar = "ivar version | head -n 1 | cut -f3 -d' '"
+```
+
+Only stdout is captured (not stderr -- add your own `2>&1` if a tool prints
+its version there instead), and it's kept exactly as printed, whitespace
+trimmed from each end but otherwise unchanged -- multi-line output is fine.
+Each iteration, right before that mapper's `index_cmd`/`map_cmd` run (or,
+for `[consensus]`, right before its steps run), every configured
+tool-versions command runs and its output is recorded in that iteration's
+`stats.json`. A mapper's tool-versions only run in iterations where that
+mapper actually runs -- e.g. never for `iter_000` of a BAM-start run, which
+has no mapping step at all.
+
+The report (`index.html`) shows each tool's version once, near the top of
+its "Logs" section (see "Output" below) -- unless it *changed* partway
+through the run, in which case that's flagged prominently instead, listing
+every distinct version seen and which iteration(s) reported it. This is the
+point of the feature: confirming the same tool binary was used from start
+to finish, since a version drifting mid-run (a PATH change, an unpinned
+container tag, a background upgrade) can quietly invalidate a comparison
+between early and late iterations.
 
 ### Command steps: list or shell string
 
@@ -157,6 +214,11 @@ this).
 - `{threads}` -- from `[run]` threads. See "Threads and custom `[run]`
   variables" below for `threads = "auto"` and defining your own placeholders
   alongside it (e.g. for splitting a thread budget across a piped command).
+- `{output_dir}` -- the effective output directory: `--output-dir` if given,
+  else `[run].output_dir`. Useful in `[output].consensus_fasta` and
+  `[output].commands` (see "Final output: `[output]`" below) to put the
+  final deliverable, or something derived from it, under the same directory
+  as everything else the run produced.
 - `{reads_1}`, `{reads_2}`, `{reads_single}` -- the read-file lists, matching
   `[input]`'s `reads_1`/`reads_2`/`reads_single` one-for-one. Only present if
   that category is non-empty for this run -- referencing e.g.
@@ -166,11 +228,13 @@ this).
 ### Threads and custom `[run]` variables
 
 Every `[run]` key is available as a `{name}` placeholder in every
-`index_cmd`, `map_cmd`, and `[consensus]` step -- both the ones with
-dedicated meaning (`{threads}`, `{max_iterations}`,
-`{convergence_identity}`, `{convergence_streak}`, `{threads_reserve}`) and
-any custom ones you add. This is handy for more than just thread counts --
-e.g. a logging step that records what a run was configured with:
+`index_cmd`, `map_cmd`, and `[consensus]` step (and, for `{output_dir}`
+especially, in `[output].consensus_fasta`/`commands` too -- see "Final
+output: `[output]`") -- both the ones with dedicated meaning (`{threads}`,
+`{max_iterations}`, `{convergence_identity}`, `{convergence_streak}`,
+`{threads_reserve}`, `{output_dir}`) and any custom ones you add. This is
+handy for more than just thread counts -- e.g. a logging step that records
+what a run was configured with:
 
 ```toml
 [run]
@@ -190,8 +254,8 @@ steps = [
 A custom variable can't reuse a name iterated-consensus already sets itself
 (the dedicated `[run]` fields above, plus the per-iteration placeholders
 `reference`, `index_prefix`, `bam`, `consensus_prefix`, `reads_1`, `reads_2`,
-`reads_single`) -- that's rejected at config load time rather than silently
-shadowed.
+`reads_single`, `consensus_fasta`, `consensus_id`) -- that's rejected at
+config load time rather than silently shadowed.
 
 **`threads = "auto"`** resolves to the number of CPUs actually available to
 the process (respecting container/cgroup/`taskset` limits on Linux, where
@@ -275,7 +339,7 @@ Your input BAM itself is never rewritten, regardless of any of this. Some of
 the above needs it indexed, which needs it coordinate-sorted; if it's
 already sorted, an index is created directly beside it if missing (that's
 harmless -- purely additive, same as any tool would do), but if it actually
-needs sorting, that happens to a separate copy under `--out-dir`, not to
+needs sorting, that happens to a separate copy under `--output-dir`, not to
 your file. (This is specifically about the BAM you pass in via `bam =`;
 BAMs iterated-consensus generates itself, like each iteration's mapping
 output, are sorted in place freely -- those are its own working files.)
@@ -346,31 +410,82 @@ useful for a sample that may never perfectly stabilize (e.g. a genuinely
 heterogeneous/mixed population), where "close enough" is a more realistic
 stopping condition than exact equality.
 
+### Cycle detection
+
+Some inputs never settle on a single consensus: the majority call at one or
+more sites flips back and forth (e.g. a near-50/50 heterozygous position),
+so the run oscillates among a small set of sequences instead of converging.
+Left alone, that would just burn through every iteration up to
+`max_iterations`. Instead, every new iteration's consensus MD5 (see
+`consensus_md5` in "Output" below) is checked against every *earlier*
+iteration's, not just the immediately preceding one -- if it matches, the
+run stops immediately, reported as a detected cycle rather than as
+converged or as having hit `max_iterations`.
+
+The *first* occurrence of the repeated sequence is treated as the result --
+it's what `[output].consensus_fasta`/`commands` run against, and what
+`index.html`'s "Final ..." stats reflect -- not the later iteration that
+happened to repeat it, since the earlier one is exactly as valid a
+representative of the cycle and arrived at with less noise accumulated
+along the way. The iterations that actually ran (including the repeat) are
+still all recorded normally, so the cycle itself is visible: in
+`--progress`/the per-iteration table via the repeating `consensus_md5`
+values, and as its own prominent notice at the top of `index.html`.
+
+A cycle of period 1 (immediately repeating the previous iteration exactly)
+isn't a special case at all -- that's just ordinary convergence with the
+default `convergence_identity = 100.0`, handled the normal way. Cycle
+detection specifically covers longer periods (2 or more) that the
+adjacent-iteration `identity_to_previous` check can't see. Resuming a run
+that stopped this way re-detects the same cycle (from the recorded history)
+rather than continuing to iterate.
+
 ### Final output: `[output]`
 
-Everything a run produces lives under `--out-dir` regardless, findable as
+Everything a run produces lives under `--output-dir` regardless, findable as
 `iter_NNN/consensus.fasta` for whichever iteration ran last (see "Output"
 below) -- `[output]` is an optional convenience on top of that, for when you
 want the final result copied somewhere specific rather than having to know
 which `iter_NNN` was the last one.
 
-- `consensus_fasta` -- where to copy it to. Can be anywhere, not
-  necessarily under `--out-dir`. Its parent directory is created if
-  missing.
+- `consensus_fasta` -- where to copy it to. This is a *template*, not a
+  plain path: it's rendered against the same placeholders every other
+  command gets (`{threads}`, any custom `[run]` variables, and
+  `{output_dir}` -- see "Threads and custom `[run]` variables"), then used
+  as-is. A relative result is **not** auto-placed under `--output-dir`: it's
+  just a normal relative path, resolved against the current working
+  directory like any other file argument. Write
+  `consensus_fasta = "{output_dir}/final_consensus.fasta"` to put it
+  alongside everything else the run produced; leave `{output_dir}` out to
+  get a plain cwd-relative (or absolute) path instead. Either way, its
+  parent directory is created if missing.
 - `consensus_id` -- the FASTA header to give the copy. Optional; if
   omitted, it keeps whatever id the consensus tool itself assigned.
   Requires `consensus_fasta` to also be given -- renaming with nowhere to
   write doesn't mean anything on its own.
+- `commands` -- steps (same `index_cmd`/`map_cmd`/`[consensus]` steps
+  syntax: a list, each a list of argv tokens or a shell string) to run once
+  `consensus_fasta` has been written. Requires `consensus_fasta` to also be
+  given. Two extra placeholders are available here on top of the usual ones
+  (`{threads}` and friends, any custom `[run]` variables -- see "Threads and
+  custom `[run]` variables"): `{consensus_fasta}` (the path just written) and
+  `{consensus_id}` (the id that ended up in it -- the resolved value, so
+  it's set even when `consensus_id` itself was left unset in the config).
+  Logs go to `--output-dir/logs/output_command_NN.log`. A failing command
+  aborts the run the same way a failing mapper/consensus step would.
 
 This always uses whichever iteration ran *last* -- converged or not, since
 even a run that hit `max_iterations` without converging usually still has a
-usable "current best" consensus worth having on hand. It's written (or
-rewritten) at the end of every `run()` call, including a resumed run that
-turns out to already be converged -- so re-running the same command is
-always safe. Unlike `reference_initial.fasta` (see "Reference resolution"
-above), this is always a real copy, never a symlink: it's meant to be a
-small, standalone, portable deliverable, not a pointer back into
-`--out-dir`'s own working files.
+usable "current best" consensus worth having on hand. Both the copy and
+`commands` happen at the end of every `run()` call, including a resumed run
+that turns out to already be converged -- so re-running the same command is
+always safe (though note `commands` therefore also re-runs every time, e.g.
+on a repeated already-converged `run()` call -- keep that in mind for a
+command with side effects elsewhere, like an upload). Unlike
+`reference_initial.fasta` (see "Reference resolution" above), the copy
+itself is always a real copy, never a symlink: it's meant to be a small,
+standalone, portable deliverable, not a pointer back into `--output-dir`'s own
+working files.
 
 ## Output
 
@@ -403,20 +518,22 @@ results/
     <mapper>.bam              that mapper's mapping output (FASTQ-start only)
     merged.bam                 (only if >1 mapper) merged BAM the consensus step sees
     consensus.fasta             this iteration's consensus
-    stats.json                  reads mapped, length, identity to previous, base composition
+    stats.json                  reads mapped, length, identity to previous, consensus MD5,
+                                 base composition, tool versions, per-command logs -- see below
     logs/                        captured stdout+stderr of every command run
   iter_001/
     <mapper>_index.*         index files, one set per configured mapper
     <mapper>.bam              that mapper's mapping output
     merged.bam                 (only if >1 mapper) merged BAM the consensus step sees
     consensus.fasta             this iteration's consensus
-    stats.json                  reads mapped, length, identity to previous, base composition
+    stats.json                  reads mapped, length, identity to previous, consensus MD5,
+                                 base composition, tool versions, per-command logs -- see below
     logs/                        captured stdout+stderr of every command run
   iter_002/
     ...
   metrics.tsv                 one row per iteration
-  summary.json                 iterations run, converged?, total time
-  index.html                    human-readable report rendered from summary.json
+  summary.json                 iterations run, converged?, total time, [output].commands log
+  index.html                    human-readable report -- see "Logs" below
 ```
 
 `reference_initial.fasta` is a *relative* symlink straight to your original
@@ -434,24 +551,61 @@ needs (indexed, coordinate-sorted, and -- for `bam_reads` other than
 transformation, not a copy, so `iteration_0_source.bam` under `reads/` is
 always a genuine file.
 
+### Consensus composition
+
+`index.html` has a "Consensus composition" card for the final consensus:
+the count of every character in it (the four unambiguous bases, plus any
+IUPAC ambiguity codes or gap characters actually present), what percent of
+the sequence is unambiguous (plain A/C/G/T), and GC content -- computed as
+a fraction of just the unambiguous bases, since ambiguity codes and gaps
+aren't G or C by definition and would otherwise just dilute the number.
+This data lives in each iteration's `stats.json` under `"composition"` too
+(every iteration's, not just the final one's), if you want it directly.
+
+### Logs
+
+`index.html` ends with a "Logs" section (only present if there's anything to
+show -- a run with no `[tool-versions]` configured and no logged commands
+skips it entirely):
+
+- **Tool versions**, once each, if `[mapper.tool-versions]`/
+  `[consensus.tool-versions]` are configured -- see "Tool versions" above for
+  how they're collected, and how a version that changed mid-run is flagged.
+- **One collapsible entry per iteration**, listing every command that
+  iteration ran (`index_cmd`, `map_cmd` for each mapper, each `[consensus]`
+  step) -- click to expand and see its full standard output/error and how
+  long it took. A command that produced nothing just says so, rather than
+  showing an empty block.
+- **Final output**, if `[output].commands` ran, in the same collapsible
+  format.
+
+The same detail lives in each iteration's `stats.json` (`tool_versions`,
+`commands`) and, for `[output].commands`, in `summary.json`
+(`output_commands`) -- `index.html` is a rendering of that, not a separate
+source of truth.
+
 ## Resuming a run
 
 If a run stops because it hit `max_iterations` without converging, raise
 `max_iterations` in the config and rerun the exact same command (same
-`--config`, same `--out-dir`): it picks up from the next iteration rather
+`--config`, same `--output-dir`): it picks up from the next iteration rather
 than starting over. This is detected automatically from `summary.json` in
-`--out-dir` -- there's no separate flag. Already-extracted reads and
+`--output-dir` -- there's no separate flag. Already-extracted reads and
 already-completed iterations aren't redone.
 
-If a run already converged, rerunning it against the same `--out-dir` is a
-no-op: it reports the existing result without redoing anything.
+If a run already converged, rerunning it against the same `--output-dir` is a
+no-op: it reports the existing result without redoing anything. The same is
+true if it stopped because a cycle was detected (see "Cycle detection"
+above) -- rerunning re-reports the same cycle rather than iterating further,
+even against a `summary.json` written before cycle detection existed, since
+that's checked retroactively too.
 
-Resume trusts that `--out-dir` corresponds to the same logical run --
+Resume trusts that `--output-dir` corresponds to the same logical run --
 pointing it at a config with a different mapper, consensus pipeline, or
 input isn't validated or rejected, it'll just continue on top of whatever's
 there. Also, resuming is driven entirely by `summary.json`; a run that
 crashed before writing it (e.g. killed mid-iteration) can't be resumed and
-should be started fresh in a new `--out-dir`.
+should be started fresh in a new `--output-dir`.
 
 ## Known limitations
 

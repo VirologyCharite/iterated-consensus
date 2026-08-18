@@ -24,13 +24,34 @@ app = typer.Typer(
 )
 
 
+_PROGRESS_COLUMNS = (
+    ("iter", 4, ">"),
+    ("reads_mapped", 13, ">"),
+    ("consensus_length", 18, ">"),
+    ("identity_to_previous", 22, ">"),
+    ("elapsed", 8, ">"),
+    ("consensus_md5", 32, ">"),
+)
+
+
+def _print_progress_header() -> None:
+    typer.echo("  ".join(f"{name:{align}{width}}" for name, width, align in _PROGRESS_COLUMNS))
+
+
 def _print_iteration_progress(record: IterationRecord) -> None:
+    values = (
+        str(record.iteration),
+        str(record.reads_mapped),
+        str(record.consensus_length),
+        format_identity(record.identity_to_previous),
+        format_elapsed(record.elapsed_seconds),
+        record.consensus_md5 or "",
+    )
     typer.echo(
-        f"iter {record.iteration:>3}  "
-        f"reads_mapped={record.reads_mapped:<8} "
-        f"consensus_length={record.consensus_length:<8} "
-        f"identity_to_previous={format_identity(record.identity_to_previous):<9} "
-        f"elapsed={format_elapsed(record.elapsed_seconds)}"
+        "  ".join(
+            f"{value:{align}{width}}"
+            for value, (_, width, align) in zip(values, _PROGRESS_COLUMNS, strict=True)
+        )
     )
 
 
@@ -39,9 +60,17 @@ def run_cmd(
     config_path: Annotated[
         Path, typer.Option("--config", "-c", exists=True, readable=True, help="Pipeline TOML config.")
     ],
-    out_dir: Annotated[
-        Path, typer.Option("--out-dir", "-o", help="Output directory (created if missing).")
-    ],
+    output_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--output-dir",
+            "-o",
+            help=(
+                "Output directory (created if missing). Falls back to [run].output_dir "
+                "in the config if not given here."
+            ),
+        ),
+    ] = None,
     dry_run: Annotated[
         bool,
         typer.Option(
@@ -109,6 +138,15 @@ def run_cmd(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1) from None
 
+    out_dir = output_dir if output_dir is not None else config.output_dir
+    if out_dir is None:
+        typer.echo(
+            "error: no output directory given: pass --output-dir or set [run].output_dir "
+            "in the config",
+            err=True,
+        )
+        raise typer.Exit(1)
+
     try:
         if dry_run:
             result = preview(config, out_dir)
@@ -116,19 +154,33 @@ def run_cmd(
                 typer.echo(f"$ {line}")
             typer.echo(f"\n# {result.note}")
         else:
-            if progress and (out_dir / "summary.json").exists():
-                typer.echo(f"Resuming from existing output in {out_dir}")
+            if progress:
+                if (out_dir / "summary.json").exists():
+                    typer.echo(f"Resuming from existing output in {out_dir}")
+                _print_progress_header()
             on_iteration = _print_iteration_progress if progress else None
             outcome = run(config, out_dir, on_iteration=on_iteration)
-            status = "Converged" if outcome.converged else "Stopped (max_iterations reached)"
+            if outcome.cycle is not None:
+                status = f"Cycle detected (period {outcome.cycle.period})"
+            elif outcome.converged:
+                status = "Converged"
+            else:
+                status = "Stopped (max_iterations reached)"
             typer.echo(
                 f"{status} after {len(outcome.iterations)} iteration(s) "
                 f"in {format_elapsed(outcome.total_elapsed_seconds)}"
             )
+            if outcome.cycle is not None:
+                c = outcome.cycle
+                typer.echo(
+                    f"Iteration {c.repeat_iteration}'s consensus matches iteration "
+                    f"{c.first_iteration}'s (MD5 {c.consensus_md5}) -- the run is oscillating "
+                    f"rather than converging. Using iteration {c.first_iteration} as the final consensus."
+                )
             typer.echo(f"Output written to {outcome.output_dir}")
             typer.echo(f"Report: {outcome.output_dir / 'index.html'}")
-            if config.output is not None and config.output.consensus_fasta is not None:
-                typer.echo(f"Final consensus: {config.output.consensus_fasta}")
+            if outcome.final_consensus_path is not None:
+                typer.echo(f"Final consensus: {outcome.final_consensus_path}")
     except IteratedConsensusError as exc:
         if traceback:
             raise

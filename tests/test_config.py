@@ -195,6 +195,42 @@ threads = "fast"
         parse_config(text)
 
 
+def test_run_section_output_dir_parsed() -> None:
+    text = MAPPER + CONSENSUS + """
+[input]
+reads_single = ["s.fq"]
+reference_id = "NC_045512.2"
+
+[run]
+output_dir = "results/run1"
+"""
+    config = parse_config(text)
+    assert config.output_dir == Path("results/run1")
+
+
+def test_no_run_section_output_dir_is_none() -> None:
+    config = parse_config(MAPPER + CONSENSUS)
+    assert config.output_dir is None
+
+
+def test_run_section_output_dir_bad_type_raises() -> None:
+    text = MAPPER + CONSENSUS + """
+[run]
+output_dir = 5
+"""
+    with pytest.raises(ConfigError, match="output_dir"):
+        parse_config(text)
+
+
+def test_run_section_output_dir_not_leaked_into_extra_vars() -> None:
+    text = MAPPER + CONSENSUS + """
+[run]
+output_dir = "results/run1"
+"""
+    config = parse_config(text)
+    assert "output_dir" not in config.extra_vars
+
+
 def test_no_mappers_raises() -> None:
     with pytest.raises(ConfigError, match="at least one"):
         parse_config(CONSENSUS)
@@ -330,7 +366,7 @@ consensus_id = "my-sample"
 """
     config = parse_config(text)
     assert config.output is not None
-    assert config.output.consensus_fasta == Path("final/result.fasta")
+    assert config.output.consensus_fasta == "final/result.fasta"
     assert config.output.consensus_id == "my-sample"
 
 
@@ -341,7 +377,7 @@ consensus_fasta = "final/result.fasta"
 """
     config = parse_config(text)
     assert config.output is not None
-    assert config.output.consensus_fasta == Path("final/result.fasta")
+    assert config.output.consensus_fasta == "final/result.fasta"
     assert config.output.consensus_id is None
 
 
@@ -359,10 +395,135 @@ def test_no_output_section_is_fine() -> None:
     assert config.output is None
 
 
+def test_output_section_commands_parsed() -> None:
+    text = MAPPER + CONSENSUS + """
+[output]
+consensus_fasta = "final/result.fasta"
+commands = [
+    ["samtools", "faidx", "{consensus_fasta}"],
+    "gzip -k {consensus_fasta}",
+]
+"""
+    config = parse_config(text)
+    assert config.output is not None
+    assert config.output.commands == (
+        ["samtools", "faidx", "{consensus_fasta}"],
+        "gzip -k {consensus_fasta}",
+    )
+
+
+def test_output_section_commands_without_consensus_fasta_raises() -> None:
+    text = MAPPER + CONSENSUS + """
+[output]
+commands = [["samtools", "faidx", "{consensus_fasta}"]]
+"""
+    with pytest.raises(ConfigError, match="commands needs consensus_fasta"):
+        parse_config(text)
+
+
+def test_output_section_commands_default_empty() -> None:
+    text = MAPPER + CONSENSUS + """
+[output]
+consensus_fasta = "final/result.fasta"
+"""
+    config = parse_config(text)
+    assert config.output is not None
+    assert config.output.commands == ()
+
+
+def test_output_section_commands_not_a_list_raises() -> None:
+    text = MAPPER + CONSENSUS + """
+[output]
+consensus_fasta = "final/result.fasta"
+commands = "not a list"
+"""
+    with pytest.raises(ConfigError, match="commands must be a list"):
+        parse_config(text)
+
+
+def test_run_section_extra_var_colliding_with_consensus_fasta_raises() -> None:
+    text = MAPPER + CONSENSUS + """
+[input]
+reads_single = ["s.fq"]
+reference_id = "NC_045512.2"
+
+[run]
+consensus_fasta = "oops"
+"""
+    with pytest.raises(ConfigError, match="collide"):
+        parse_config(text)
+
+
 def test_list_command_step_preserved() -> None:
     config = parse_config(MAPPER + CONSENSUS)
     assert config.mappers[0].index_cmd == ["bowtie2-build", "{reference}", "{index_prefix}"]
     assert isinstance(config.mappers[0].map_cmd, str)
+
+
+def test_no_tool_versions_is_fine() -> None:
+    config = parse_config(MAPPER + CONSENSUS)
+    assert config.mappers[0].tool_versions == {}
+    assert config.consensus.tool_versions == {}
+
+
+def test_mapper_tool_versions_parsed() -> None:
+    text = MAPPER + """
+[mapper.tool-versions]
+bowtie2 = "bowtie2 --version | head -n 1 | cut -f3 -d' '"
+samtools = ["samtools", "--version"]
+""" + CONSENSUS
+    config = parse_config(text)
+    assert config.mappers[0].tool_versions == {
+        "bowtie2": "bowtie2 --version | head -n 1 | cut -f3 -d' '",
+        "samtools": ["samtools", "--version"],
+    }
+
+
+def test_consensus_tool_versions_parsed() -> None:
+    text = MAPPER + CONSENSUS + """
+[consensus.tool-versions]
+ivar = "ivar version | head -n 1 | cut -f3 -d' '"
+"""
+    config = parse_config(text)
+    assert config.consensus.tool_versions == {"ivar": "ivar version | head -n 1 | cut -f3 -d' '"}
+
+
+def test_tool_versions_attach_to_correct_mapper_in_array() -> None:
+    text = MAPPER + """
+[mapper.tool-versions]
+bowtie2 = "echo bowtie2-version"
+
+[[mapper]]
+name = "bwa"
+index_cmd = ["bwa", "index"]
+map_cmd = "bwa mem"
+""" + CONSENSUS
+    config = parse_config(text)
+    assert config.mappers[0].name == "bowtie2"
+    assert config.mappers[0].tool_versions == {"bowtie2": "echo bowtie2-version"}
+    assert config.mappers[1].name == "bwa"
+    assert config.mappers[1].tool_versions == {}
+
+
+def test_mapper_tool_versions_not_a_table_raises() -> None:
+    text = """
+[[mapper]]
+name = "bowtie2"
+index_cmd = ["bowtie2-build"]
+map_cmd = "bowtie2"
+"tool-versions" = "not a table"
+""" + CONSENSUS
+    with pytest.raises(ConfigError, match="must be a table"):
+        parse_config(text)
+
+
+def test_tool_versions_bad_command_type_raises() -> None:
+    text = MAPPER + CONSENSUS + """
+[consensus.tool-versions]
+ivar = 5
+"""
+    with pytest.raises(ConfigError, match="string or a list of strings"):
+        parse_config(text)
 
 
 def test_invalid_toml_raises() -> None:
