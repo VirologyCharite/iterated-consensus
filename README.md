@@ -47,7 +47,7 @@ crash with the full Python traceback, for debugging.
 ## Config format
 
 A config has one or more `[[mapper]]` tables, one `[consensus]` table, and
-optionally `[input]` and `[run]`.
+optionally `[input]`, `[output]`, and `[run]`.
 
 ```toml
 [[mapper]]
@@ -63,7 +63,7 @@ map_cmd = "bowtie2 -x {index_prefix} -1 {reads_1:,} -2 {reads_2:,} -p {threads} 
 steps = [
     "samtools mpileup -aa -A -d 0 -Q 0 -f {reference} {bam} | ivar consensus -p {consensus_prefix} -t 0.5",
 ]
-output = "{consensus_prefix}.fa"   # where the harness should find the result
+output = "{consensus_prefix}.fa"   # where to find the result -- see note below
 
 [input]
 reads_1 = ["a_R1.fastq.gz", "b_R1.fastq.gz"]  # 0 or more paired sets
@@ -77,18 +77,41 @@ reference_fasta = "starting_reference.fasta"  # a local file...
 # reference_fasta = "chr2.fasta"  # optional -- see "Reference resolution" below
 # bam_reads = "ref"            # ref | ref+unal | all -- see below
 
+[output]
+# consensus_fasta = "final_consensus.fasta"   # copy the last iteration's
+#   consensus here once the run finishes, converged or not -- see below
+# consensus_id = "my-sample-name"              # optional new FASTA header
+
 [run]
-threads = 4
+threads = 4                    # or "auto" -- see "Threads and custom [run]
+                                # variables" below
 max_iterations = 20
 convergence_identity = 100.0   # stop once consensus identity to the previous
                                 # iteration reaches this percent...
 convergence_streak = 1         # ...for this many iterations in a row
+
+# Anything else here becomes a {name} placeholder in every command, e.g.:
+# min_depth = 10               # -> {min_depth} in [consensus] steps
+# sample_name = "patient-42"   # -> {sample_name} anywhere
 ```
 
 `[input]` can instead (or partly) be supplied on the command line -- see
 `iterated-consensus run --help`. CLI values override the config's `[input]`
 field-by-field, so a config can be fully self-contained or left generic and
 pointed at different data per invocation.
+
+`[consensus].output` is only used right after the steps run, to find and
+read whatever file your tool actually wrote (different tools name it
+differently -- `ivar consensus -p PREFIX` writes `PREFIX.fa`, which is why
+the example above is `output = "{consensus_prefix}.fa"`, not
+`{consensus_prefix}` alone). What gets read there is then copied to this
+iteration's own `consensus.fasta` (see "Output" below) -- and it's *that*
+fixed-name copy, not the path `output` pointed to, that later becomes
+`{reference}` for the next iteration. This is why a mapper's `index_cmd` in
+`--dry-run` output references `consensus.fasta` even if your `output`
+pattern produces a different filename or extension: `output` only has to
+match what your consensus tool actually writes, nothing downstream reads
+that path directly.
 
 ### Command steps: list or shell string
 
@@ -128,13 +151,92 @@ this).
   guess.
 - `{index_prefix}` -- path prefix for this mapper's index this iteration.
 - `{bam}` -- path this mapper should write its BAM to.
-- `{consensus_prefix}` -- path prefix for the consensus step's output.
-- `{threads}` -- from `[run]` threads.
+- `{consensus_prefix}` -- path prefix for the consensus step's output (see
+  the note on `[consensus].output` above -- this is not the same file that
+  later becomes `{reference}`).
+- `{threads}` -- from `[run]` threads. See "Threads and custom `[run]`
+  variables" below for `threads = "auto"` and defining your own placeholders
+  alongside it (e.g. for splitting a thread budget across a piped command).
 - `{reads_1}`, `{reads_2}`, `{reads_single}` -- the read-file lists, matching
   `[input]`'s `reads_1`/`reads_2`/`reads_single` one-for-one. Only present if
   that category is non-empty for this run -- referencing e.g.
   `{reads_single}` in a run with no unpaired reads is a config error, so a
   mapper template should only reference the categories it actually expects.
+
+### Threads and custom `[run]` variables
+
+Every `[run]` key is available as a `{name}` placeholder in every
+`index_cmd`, `map_cmd`, and `[consensus]` step -- both the ones with
+dedicated meaning (`{threads}`, `{max_iterations}`,
+`{convergence_identity}`, `{convergence_streak}`, `{threads_reserve}`) and
+any custom ones you add. This is handy for more than just thread counts --
+e.g. a logging step that records what a run was configured with:
+
+```toml
+[run]
+threads = 8
+min_depth = 10
+sample_name = "patient-42"
+```
+
+```toml
+[consensus]
+steps = [
+    "samtools mpileup -d 0 {bam} | ivar consensus -t 0.5 -m {min_depth} -p {consensus_prefix}",
+    'echo "Built {sample_name} consensus at {threads} threads, target {convergence_identity}% over {max_iterations} iterations" >> log.txt',
+]
+```
+
+A custom variable can't reuse a name iterated-consensus already sets itself
+(the dedicated `[run]` fields above, plus the per-iteration placeholders
+`reference`, `index_prefix`, `bam`, `consensus_prefix`, `reads_1`, `reads_2`,
+`reads_single`) -- that's rejected at config load time rather than silently
+shadowed.
+
+**`threads = "auto"`** resolves to the number of CPUs actually available to
+the process (respecting container/cgroup/`taskset` limits on Linux, where
+that's exposed; the installed core count elsewhere) at config-load time, once
+per run -- not re-detected per iteration. Pair it with `threads_reserve` (an
+integer, only valid alongside `threads = "auto"`) to leave some cores free
+for other work on the machine:
+
+```toml
+[run]
+threads = "auto"
+threads_reserve = 2   # use (detected CPUs - 2), never less than 1
+```
+
+**Splitting a thread budget across a pipe.** `{threads}` is one number, but a
+piped command like `bwa mem | samtools sort` or
+`samtools mpileup | ivar consensus` runs two programs *concurrently*, each of
+which could use its own thread count -- and since they're running at the same
+time, those counts add up against your actual core count, they don't each
+get to use the whole budget. Using `{threads}` unmodified for more than one
+stage of the same pipe oversubscribes the machine. iterated-consensus doesn't
+try to auto-split `{threads}` for you -- pipeline stages have wildly
+different threading characteristics (some don't support it at all, some
+scale linearly, some plateau early), so a generic split would just be a
+guess. Instead, treat `{threads}` (or a `threads = "auto"` budget) as the
+total, and partition it yourself into named `[run]` variables that add up to
+no more than that:
+
+```toml
+[run]
+threads = "auto"
+threads_reserve = 2   # e.g. resolves to 6 on an 8-core machine
+map_threads = 5       # give most of the budget to the mapper...
+sort_threads = 1       # ...and a thread or two to samtools sort running
+                        # alongside it in the same pipe
+
+[[mapper]]
+name = "bwa"
+map_cmd = "bwa mem -t {map_threads} {index_prefix} {cat:reads_1} {cat:reads_2} | samtools sort -@ {sort_threads} -o {bam}"
+```
+
+`{threads}` is still the right placeholder for any command that's just one
+program (most `index_cmd`s, or a `[consensus]` step with no pipe) -- reach
+for named variables like `map_threads`/`sort_threads` only where a pipe
+means two or more programs are genuinely running at once.
 
 ### Read-list expansion syntax
 
@@ -244,6 +346,32 @@ useful for a sample that may never perfectly stabilize (e.g. a genuinely
 heterogeneous/mixed population), where "close enough" is a more realistic
 stopping condition than exact equality.
 
+### Final output: `[output]`
+
+Everything a run produces lives under `--out-dir` regardless, findable as
+`iter_NNN/consensus.fasta` for whichever iteration ran last (see "Output"
+below) -- `[output]` is an optional convenience on top of that, for when you
+want the final result copied somewhere specific rather than having to know
+which `iter_NNN` was the last one.
+
+- `consensus_fasta` -- where to copy it to. Can be anywhere, not
+  necessarily under `--out-dir`. Its parent directory is created if
+  missing.
+- `consensus_id` -- the FASTA header to give the copy. Optional; if
+  omitted, it keeps whatever id the consensus tool itself assigned.
+  Requires `consensus_fasta` to also be given -- renaming with nowhere to
+  write doesn't mean anything on its own.
+
+This always uses whichever iteration ran *last* -- converged or not, since
+even a run that hit `max_iterations` without converging usually still has a
+usable "current best" consensus worth having on hand. It's written (or
+rewritten) at the end of every `run()` call, including a resumed run that
+turns out to already be converged -- so re-running the same command is
+always safe. Unlike `reference_initial.fasta` (see "Reference resolution"
+above), this is always a real copy, never a symlink: it's meant to be a
+small, standalone, portable deliverable, not a pointer back into
+`--out-dir`'s own working files.
+
 ## Output
 
 Iterations are numbered from 0. `iter_000` is always the bootstrap step: it
@@ -268,7 +396,8 @@ before it to compare against.
 ```
 results/
   reads/                     extracted/concatenated read files (built once)
-  reference_initial.fasta    normalized starting reference (FASTQ-start only)
+  reference_initial.fasta    starting reference (FASTQ-start always; BAM-start
+                             if one was resolved) -- see note below
   iter_000/
     <mapper>_index.*         index files (FASTQ-start only -- see above)
     <mapper>.bam              that mapper's mapping output (FASTQ-start only)
@@ -289,6 +418,21 @@ results/
   summary.json                 iterations run, converged?, total time
   index.html                    human-readable report rendered from summary.json
 ```
+
+`reference_initial.fasta` is a *relative* symlink straight to your original
+`reference_fasta` (or the NCBI-fetched cache file) whenever that's safe --
+i.e. it already contains exactly the one sequence needed, nothing else --
+rather than a copy, so a large reference genome doesn't get needlessly
+duplicated. If `reference_id` had to pick one record out of a
+multi-sequence `reference_fasta`, symlinking isn't possible (the file has
+other sequences in it too), so that case still writes a real single-record
+copy. Either way, `{reference}` behaves identically -- every tool that
+reads it follows the symlink transparently. The BAM itself is never
+symlinked here: getting from a full input BAM to what `iter_000` actually
+needs (indexed, coordinate-sorted, and -- for `bam_reads` other than
+`all` -- filtered down to reads for the chosen reference) is a real
+transformation, not a copy, so `iteration_0_source.bam` under `reads/` is
+always a genuine file.
 
 ## Resuming a run
 

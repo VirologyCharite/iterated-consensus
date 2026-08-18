@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -17,6 +18,36 @@ from .errors import IteratedConsensusError
 CommandStep = str | list[str]
 BamReadsMode = Literal["ref", "ref+unal", "all"]
 _VALID_BAM_READS_MODES = ("ref", "ref+unal", "all")
+
+# [run] keys with dedicated Config fields -- anything else under [run] becomes
+# a custom {name} placeholder usable in mapper/consensus commands (see
+# Config.extra_vars).
+_KNOWN_RUN_KEYS = frozenset(
+    {"threads", "threads_reserve", "max_iterations", "convergence_identity", "convergence_streak"}
+)
+
+# Placeholder names iterated-consensus fills in itself, once per iteration --
+# a custom [run] variable can't reuse one of these (see Config.validate). This
+# is _KNOWN_RUN_KEYS (all of which double as placeholders -- see runner.py)
+# plus the placeholders that aren't [run] keys at all.
+_RESERVED_PLACEHOLDER_NAMES = _KNOWN_RUN_KEYS | frozenset(
+    {"reference", "index_prefix", "bam", "consensus_prefix", "reads_1", "reads_2", "reads_single"}
+)
+
+
+def available_cpu_count() -> int:
+    """CPUs actually usable by this process, not just installed.
+
+    Prefers the scheduler affinity mask where the platform exposes one
+    (Linux -- also respects cgroup/container CPU limits there), since that's
+    a tighter bound than the physical core count when running inside a
+    container or under `taskset`. Falls back to the total installed count
+    elsewhere (e.g. macOS, which has no `sched_getaffinity`).
+    """
+    try:
+        return len(os.sched_getaffinity(0))  # type: ignore[attr-defined]
+    except AttributeError:
+        return os.cpu_count() or 1
 
 
 class ConfigError(IteratedConsensusError, ValueError):
@@ -78,6 +109,16 @@ class InputSpec:
 
 
 @dataclass(frozen=True)
+class OutputSpec:
+    consensus_fasta: Path | None = None
+    consensus_id: str | None = None
+
+    def validate(self) -> None:
+        if self.consensus_id is not None and self.consensus_fasta is None:
+            raise ConfigError("[output] consensus_id needs consensus_fasta to also be given")
+
+
+@dataclass(frozen=True)
 class InputOverrides:
     """CLI-supplied input fields; each `None` means "leave the config value as-is"."""
 
@@ -118,7 +159,17 @@ class Config:
     mappers: tuple[Mapper, ...]
     consensus: ConsensusSpec
     input: InputSpec | None = None
+    output: OutputSpec | None = None
     threads: int = 1
+    threads_reserve: int = 0
+    """Only meaningful (and only settable) alongside threads = "auto" -- see
+    _resolve_threads. Kept here (rather than discarded once resolved) purely
+    so it's available as a {threads_reserve} placeholder like the rest of
+    [run], e.g. for a logging step."""
+    extra_vars: dict[str, str | int | float | bool] = field(default_factory=dict)
+    """Custom [run] variables (anything under [run] besides the dedicated
+    fields on this class), usable as {name} placeholders in every
+    mapper/consensus command -- same as {threads}, {max_iterations}, etc."""
     max_iterations: int = 20
     convergence_identity: float = 100.0
     convergence_streak: int = 1
@@ -135,6 +186,12 @@ class Config:
             raise ConfigError("[consensus] must set 'output'")
         if self.threads < 1:
             raise ConfigError(f"threads must be >= 1, got {self.threads}")
+        reserved_used = sorted(set(self.extra_vars) & _RESERVED_PLACEHOLDER_NAMES)
+        if reserved_used:
+            raise ConfigError(
+                f"[run] variable(s) {reserved_used} collide with placeholder(s) "
+                "iterated-consensus sets automatically each iteration; choose different name(s)"
+            )
         if self.max_iterations < 1:
             raise ConfigError(f"max_iterations must be >= 1, got {self.max_iterations}")
         if not (0 < self.convergence_identity <= 100):
@@ -145,6 +202,8 @@ class Config:
             raise ConfigError(f"convergence_streak must be >= 1, got {self.convergence_streak}")
         if self.input is not None:
             self.input.validate()
+        if self.output is not None:
+            self.output.validate()
 
 
 def _command_step(value: object, where: str) -> CommandStep:
@@ -207,6 +266,46 @@ def _parse_input(raw: dict) -> InputSpec:
     )
 
 
+def _parse_output(raw: dict) -> OutputSpec:
+    consensus_fasta = raw.get("consensus_fasta")
+    return OutputSpec(
+        consensus_fasta=Path(consensus_fasta) if consensus_fasta is not None else None,
+        consensus_id=raw.get("consensus_id"),
+    )
+
+
+def _resolve_threads(run_raw: dict) -> int:
+    value = run_raw.get("threads", 1)
+    if value == "auto":
+        reserve = run_raw.get("threads_reserve", 0)
+        if not isinstance(reserve, int) or isinstance(reserve, bool) or reserve < 0:
+            raise ConfigError(
+                f"[run] threads_reserve must be a non-negative integer, got {reserve!r}"
+            )
+        # Leave at least 1 thread even if threads_reserve meets or exceeds
+        # the detected count -- a run that can't use any threads can't run.
+        return max(1, available_cpu_count() - reserve)
+    if "threads_reserve" in run_raw:
+        raise ConfigError('[run] threads_reserve only applies when threads = "auto"')
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ConfigError(f'[run] threads must be an integer or "auto", got {value!r}')
+    return value
+
+
+def _parse_run_extras(run_raw: dict) -> dict[str, str | int | float | bool]:
+    extras: dict[str, str | int | float | bool] = {}
+    for key, value in run_raw.items():
+        if key in _KNOWN_RUN_KEYS:
+            continue
+        if not isinstance(value, str | int | float | bool):
+            raise ConfigError(
+                f"[run] '{key}' must be a string, number, or boolean to be used as a "
+                f"command placeholder, got {value!r}"
+            )
+        extras[key] = value
+    return extras
+
+
 def parse_config(text: str) -> Config:
     """Parse and validate config TOML source (does not touch the filesystem)."""
     try:
@@ -227,12 +326,20 @@ def parse_config(text: str) -> Config:
     input_raw = raw.get("input")
     input_spec = _parse_input(input_raw) if input_raw is not None else None
 
+    output_raw = raw.get("output")
+    output_spec = _parse_output(output_raw) if output_raw is not None else None
+
     run_raw = raw.get("run", {})
+    if not isinstance(run_raw, dict):
+        raise ConfigError("[run] must be a table")
     config = Config(
         mappers=mappers,
         consensus=consensus,
         input=input_spec,
-        threads=run_raw.get("threads", 1),
+        output=output_spec,
+        threads=_resolve_threads(run_raw),
+        threads_reserve=run_raw.get("threads_reserve", 0),  # validated inside _resolve_threads above
+        extra_vars=_parse_run_extras(run_raw),
         max_iterations=run_raw.get("max_iterations", 20),
         convergence_identity=run_raw.get("convergence_identity", 100.0),
         convergence_streak=run_raw.get("convergence_streak", 1),

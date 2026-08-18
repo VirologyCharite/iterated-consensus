@@ -7,6 +7,8 @@ from iterated_consensus.reference import (
     load_reference,
     looks_like_ncbi_accession,
     parse_fasta,
+    resolve_reference,
+    symlink_reference,
     write_fasta,
 )
 
@@ -118,3 +120,77 @@ def test_looks_like_ncbi_accession_true(name: str) -> None:
 )
 def test_looks_like_ncbi_accession_false(name: str) -> None:
     assert not looks_like_ncbi_accession(name)
+
+
+def test_resolve_reference_single_record_file_is_whole_file(tmp_path: Path) -> None:
+    fasta = tmp_path / "ref.fasta"
+    fasta.write_text(">only\nACGT\n")
+    resolved = resolve_reference(reference_id=None, reference_fasta=fasta, cache_dir=tmp_path / "cache")
+    assert resolved is not None
+    assert resolved.record.id == "only"
+    assert resolved.source_path == fasta
+    assert resolved.is_whole_file
+
+
+def test_resolve_reference_multi_record_file_is_not_whole_file(tmp_path: Path) -> None:
+    fasta = tmp_path / "panel.fasta"
+    fasta.write_text(">a\nAAAA\n>b\nCCCC\n")
+    resolved = resolve_reference(reference_id="b", reference_fasta=fasta, cache_dir=tmp_path / "cache")
+    assert resolved is not None
+    assert resolved.record.id == "b"
+    assert resolved.source_path == fasta
+    assert not resolved.is_whole_file
+
+
+def test_resolve_reference_none_when_nothing_given(tmp_path: Path) -> None:
+    resolved = resolve_reference(reference_id=None, reference_fasta=None, cache_dir=tmp_path / "cache")
+    assert resolved is None
+
+
+def test_resolve_reference_id_not_accession_shaped_returns_none(tmp_path: Path) -> None:
+    resolved = resolve_reference(
+        reference_id="chr1", reference_fasta=None, cache_dir=tmp_path / "cache"
+    )
+    assert resolved is None
+
+
+def test_symlink_reference_creates_relative_link(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    target = data_dir / "ref.fasta"
+    target.write_text(">chr1\nACGT\n")
+
+    out_dir = tmp_path / "results"
+    out_dir.mkdir()
+    link = out_dir / "reference_initial.fasta"
+    symlink_reference(link, target)
+
+    assert link.is_symlink()
+    assert not Path(link.readlink()).is_absolute()
+    assert link.read_text() == ">chr1\nACGT\n"
+
+
+def test_symlink_reference_is_noop_if_already_present(tmp_path: Path) -> None:
+    target = tmp_path / "ref.fasta"
+    target.write_text(">chr1\nACGT\n")
+    link = tmp_path / "out" / "reference_initial.fasta"
+    symlink_reference(link, target)
+    original_link_target = link.readlink()
+
+    target.unlink()  # prove the second call doesn't need the target at all
+    symlink_reference(link, target)  # should not raise
+
+    assert link.readlink() == original_link_target
+
+
+def test_symlink_reference_noop_for_existing_broken_symlink(tmp_path: Path) -> None:
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    link = out_dir / "reference_initial.fasta"
+    link.symlink_to("nonexistent.fasta")  # pre-existing, broken
+
+    target = tmp_path / "ref.fasta"
+    target.write_text(">chr1\nACGT\n")
+    symlink_reference(link, target)  # should not raise, and not touch it
+
+    assert link.readlink() == Path("nonexistent.fasta")

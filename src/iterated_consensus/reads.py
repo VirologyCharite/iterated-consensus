@@ -17,9 +17,10 @@ class ReadsCatCache:
     iteration -- the original reads never change between iterations).
     """
 
-    def __init__(self, work_dir: Path):
+    def __init__(self, work_dir: Path, *, dry_run: bool = False):
         self._work_dir = work_dir
         self._cache: dict[str, Path] = {}
+        self._dry_run = dry_run
 
     def resolve(self, reads_list: ReadsList) -> Path:
         cached = self._cache.get(reads_list.name)
@@ -43,6 +44,10 @@ class ReadsCatCache:
             )
         suffix = ".fastq.gz" if is_gz.pop() else ".fastq"
         target = self._work_dir / f"{reads_list.name}.cat{suffix}"
+        if self._dry_run:
+            # Report the path this would end up at, without actually
+            # concatenating anything.
+            return target
         if not target.exists():
             self._work_dir.mkdir(parents=True, exist_ok=True)
             with target.open("wb") as out:

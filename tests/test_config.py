@@ -7,6 +7,7 @@ from iterated_consensus.config import (
     InputOverrides,
     InputSpec,
     apply_input_overrides,
+    available_cpu_count,
     parse_config,
     parse_file_list,
 )
@@ -74,6 +75,124 @@ convergence_streak = 2
     assert config.max_iterations == 5
     assert config.convergence_identity == 99.5
     assert config.convergence_streak == 2
+
+
+def test_run_section_arbitrary_variables_become_extra_vars() -> None:
+    text = MAPPER + CONSENSUS + """
+[input]
+reads_single = ["s.fq"]
+reference_id = "NC_045512.2"
+
+[run]
+sort_threads = 6
+min_depth = 10
+sample_name = "patient-42"
+strict = true
+"""
+    config = parse_config(text)
+    assert config.extra_vars == {
+        "sort_threads": 6,
+        "min_depth": 10,
+        "sample_name": "patient-42",
+        "strict": True,
+    }
+    # known [run] keys never leak into extra_vars
+    assert "threads" not in config.extra_vars
+    assert "max_iterations" not in config.extra_vars
+
+
+def test_run_section_extra_var_colliding_with_reserved_placeholder_raises() -> None:
+    text = MAPPER + CONSENSUS + """
+[input]
+reads_single = ["s.fq"]
+reference_id = "NC_045512.2"
+
+[run]
+reference = "oops"
+"""
+    with pytest.raises(ConfigError, match="collide"):
+        parse_config(text)
+
+
+def test_run_section_extra_var_bad_type_raises() -> None:
+    text = MAPPER + CONSENSUS + """
+[input]
+reads_single = ["s.fq"]
+reference_id = "NC_045512.2"
+
+[run]
+bad = [1, 2, 3]
+"""
+    with pytest.raises(ConfigError, match="string, number, or boolean"):
+        parse_config(text)
+
+
+def test_run_section_threads_auto_uses_available_cpu_count() -> None:
+    text = MAPPER + CONSENSUS + """
+[input]
+reads_single = ["s.fq"]
+reference_id = "NC_045512.2"
+
+[run]
+threads = "auto"
+"""
+    config = parse_config(text)
+    assert config.threads == available_cpu_count()
+
+
+def test_run_section_threads_auto_with_reserve() -> None:
+    text = MAPPER + CONSENSUS + """
+[input]
+reads_single = ["s.fq"]
+reference_id = "NC_045512.2"
+
+[run]
+threads = "auto"
+threads_reserve = 2
+"""
+    config = parse_config(text)
+    assert config.threads == max(1, available_cpu_count() - 2)
+
+
+def test_run_section_threads_reserve_never_drops_below_one() -> None:
+    text = MAPPER + CONSENSUS + """
+[input]
+reads_single = ["s.fq"]
+reference_id = "NC_045512.2"
+
+[run]
+threads = "auto"
+threads_reserve = 999999
+"""
+    config = parse_config(text)
+    assert config.threads == 1
+
+
+def test_run_section_threads_reserve_without_auto_raises() -> None:
+    text = MAPPER + CONSENSUS + """
+[input]
+reads_single = ["s.fq"]
+reference_id = "NC_045512.2"
+
+[run]
+threads = 4
+threads_reserve = 2
+"""
+    with pytest.raises(ConfigError, match="threads_reserve"):
+        parse_config(text)
+
+
+def test_run_section_threads_bad_value_raises() -> None:
+    text = MAPPER + CONSENSUS + """
+[input]
+reads_single = ["s.fq"]
+reference_id = "NC_045512.2"
+
+[run]
+threads = "fast"
+"""
+    with pytest.raises(ConfigError, match="threads"):
+        parse_config(text)
 
 
 def test_no_mappers_raises() -> None:
@@ -201,6 +320,43 @@ convergence_identity = 150
 """
     with pytest.raises(ConfigError, match="convergence_identity"):
         parse_config(text)
+
+
+def test_output_section_parsed() -> None:
+    text = MAPPER + CONSENSUS + """
+[output]
+consensus_fasta = "final/result.fasta"
+consensus_id = "my-sample"
+"""
+    config = parse_config(text)
+    assert config.output is not None
+    assert config.output.consensus_fasta == Path("final/result.fasta")
+    assert config.output.consensus_id == "my-sample"
+
+
+def test_output_section_consensus_id_alone_is_optional() -> None:
+    text = MAPPER + CONSENSUS + """
+[output]
+consensus_fasta = "final/result.fasta"
+"""
+    config = parse_config(text)
+    assert config.output is not None
+    assert config.output.consensus_fasta == Path("final/result.fasta")
+    assert config.output.consensus_id is None
+
+
+def test_output_section_consensus_id_without_consensus_fasta_raises() -> None:
+    text = MAPPER + CONSENSUS + """
+[output]
+consensus_id = "my-sample"
+"""
+    with pytest.raises(ConfigError, match="consensus_id needs consensus_fasta"):
+        parse_config(text)
+
+
+def test_no_output_section_is_fine() -> None:
+    config = parse_config(MAPPER + CONSENSUS)
+    assert config.output is None
 
 
 def test_list_command_step_preserved() -> None:

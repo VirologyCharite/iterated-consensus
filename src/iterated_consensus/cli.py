@@ -127,6 +127,8 @@ def run_cmd(
             )
             typer.echo(f"Output written to {outcome.output_dir}")
             typer.echo(f"Report: {outcome.output_dir / 'index.html'}")
+            if config.output is not None and config.output.consensus_fasta is not None:
+                typer.echo(f"Final consensus: {config.output.consensus_fasta}")
     except IteratedConsensusError as exc:
         if traceback:
             raise

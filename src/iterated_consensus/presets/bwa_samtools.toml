@@ -6,6 +6,12 @@
 # mate the first time it's needed -- cheap if you only gave one file per
 # mate, a one-off concatenation if you gave several.
 #
+# map_cmd pipes bwa mem straight into samtools sort, so the two run
+# concurrently -- {map_threads}/{sort_threads} below (custom [run]
+# variables, split out of {threads}) give each its own slice instead of
+# both claiming the full thread count at once. See "Threads and custom
+# [run] variables" in the README if you want to change the split.
+#
 # Assumes paired-end input. Fill in [input] below (delete whichever
 # alternative you don't need), then:
 #   iterated-consensus run --config pipelines.toml --out-dir results/
@@ -16,7 +22,7 @@
 [[mapper]]
 name = "bwa"
 index_cmd = ["bwa", "index", "-p", "{index_prefix}", "{reference}"]
-map_cmd = "bwa mem -t {threads} {index_prefix} {cat:reads_1} {cat:reads_2} | samtools sort -@ {threads} -o {bam}"
+map_cmd = "bwa mem -t {map_threads} {index_prefix} {cat:reads_1} {cat:reads_2} | samtools sort -@ {sort_threads} -o {bam}"
 
 [consensus]
 steps = [
@@ -44,8 +50,23 @@ output = "{consensus_prefix}.fa"
 #   actual reference the BAM was aligned against)
 # bam_reads = "ref"          # one of: ref, ref+unal, all
 
+[output]
+# Optional: copy the last iteration's consensus out to a location/name of
+# your choosing once the run finishes, converged or not. Leave this whole
+# section out if you're happy just reading iter_NNN/consensus.fasta
+# directly from --out-dir.
+# consensus_fasta = "final_consensus.fasta"   # where to copy it to
+# consensus_id = "my-sample-name"              # optional -- the FASTA header
+#   to give it; if omitted, keeps whatever id the consensus tool itself used
+
 [run]
-threads = 4
+threads = 4                    # or "auto" -- see the README
 max_iterations = 20
 convergence_identity = 100.0
 convergence_streak = 1
+
+# map_cmd above pipes two programs together, so they split {threads} rather
+# than each claiming all of it -- adjust to taste, but keep the two roughly
+# summing to no more than threads.
+map_threads = 3
+sort_threads = 1

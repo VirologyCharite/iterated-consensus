@@ -1,3 +1,10 @@
+# 0.2.3 August 18, 2026
+
+Added config [output] section. Symlink iteration zero files when
+possible. Don't create anything when -n is given. Turn [run]
+variables into {name} placeholders that can be used elsewhere. Added
+better threads support (including 'auto').
+
 # 0.2.1 August 18, 2026
 
 Added automatic sorting and indexing of BAM files if the mapper

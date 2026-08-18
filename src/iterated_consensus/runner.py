@@ -13,7 +13,10 @@ remap, call a new consensus.
 Directory layout written under `out_dir`:
 
     reads/                     extracted/cached read files, built once
-    reference_initial.fasta    normalized starting reference (FASTQ-start only)
+    reference_initial.fasta    starting reference (FASTQ-start always; BAM-start
+                               if one was resolved) -- a relative symlink to the
+                               original source file when that's safe (see
+                               reference.symlink_reference), else a real copy
     iter_NNN/
         <mapper>_index.*       index files (absent for iter_000 of a BAM-start run)
         <mapper>.bam           that mapper's mapping output (same caveat)
@@ -52,7 +55,7 @@ from .bam import (
     resolve_reference_name,
 )
 from .commands import RenderedCommand, render_command, run_command
-from .config import Config, ConsensusSpec, InputSpec
+from .config import Config, ConsensusSpec, InputSpec, OutputSpec
 from .consensus import ConsensusResult, run_consensus
 from .errors import IteratedConsensusError
 from .metrics import (
@@ -62,7 +65,16 @@ from .metrics import (
     sequence_identity,
 )
 from .reads import ReadsCatCache
-from .reference import FastaRecord, parse_fasta, resolve_reference, write_fasta
+from .reference import (
+    FastaRecord,
+    ResolvedReference,
+    ncbi_cache_path,
+    parse_fasta,
+    resolve_reference,
+    symlink_reference,
+    would_resolve_reference,
+    write_fasta,
+)
 from .report import write_report
 from .templating import ReadsList
 
@@ -92,6 +104,23 @@ class RunResult:
 class DryRunPreview:
     lines: tuple[str, ...]
     note: str
+
+
+def _run_level_values(config: Config) -> dict[str, object]:
+    """[run] values usable as {name} placeholders in every command.
+
+    Custom [run] variables (config.extra_vars) come first so the dedicated
+    fields below always win on a name clash -- defense in depth only, since
+    Config.validate already rejects that clash at config-load time.
+    """
+    return {
+        **config.extra_vars,
+        "threads": config.threads,
+        "threads_reserve": config.threads_reserve,
+        "max_iterations": config.max_iterations,
+        "convergence_identity": config.convergence_identity,
+        "convergence_streak": config.convergence_streak,
+    }
 
 
 def _reads_values_from_fastq(input_spec: InputSpec) -> dict[str, object]:
@@ -143,7 +172,56 @@ def _consensus_uses_reference_placeholder(consensus: ConsensusSpec) -> bool:
     return False
 
 
-def _prepare_initial_state(config: Config, out_dir: Path) -> _InitialState:
+def _write_initial_reference(reference_path: Path, resolved: ResolvedReference) -> None:
+    """Materialize `reference_path` from a resolved reference.
+
+    A relative symlink to the original source file when it's already
+    exactly the one record needed (no large file gets copied for nothing);
+    otherwise a real single-record copy, since a multi-sequence source file
+    can't be symlinked to and still look like just the one record.
+    """
+    if resolved.is_whole_file:
+        symlink_reference(reference_path, resolved.source_path)
+    else:
+        write_fasta(reference_path, resolved.record.id, resolved.record.sequence)
+
+
+def _resolve_reference_avoiding_fetch_in_preview(
+    *, reference_id: str | None, reference_fasta: Path | None, cache_dir: Path, dry_run: bool
+) -> tuple[ResolvedReference | None, bool]:
+    """`resolve_reference`, but in a dry run skips the actual NCBI fetch (network
+    call + cache write) an accession would trigger.
+
+    Returns (resolved, would_resolve): `resolved` is None either because
+    nothing could be resolved at all, or (dry-run only) because resolving it
+    would require a live fetch that was skipped; `would_resolve` tells these
+    two cases apart, since the *path* a real run would write to is knowable
+    either way.
+    """
+    would_resolve = would_resolve_reference(reference_id=reference_id, reference_fasta=reference_fasta)
+    if dry_run and reference_fasta is None and would_resolve:
+        # The only way `would_resolve` is True here is an NCBI accession.
+        # Reading an already-cached copy is fine (no network, no write) --
+        # only skip when that would require an actual live fetch.
+        assert reference_id is not None
+        if not ncbi_cache_path(reference_id, cache_dir).exists():
+            return None, would_resolve
+    resolved = resolve_reference(
+        reference_id=reference_id, reference_fasta=reference_fasta, cache_dir=cache_dir
+    )
+    return resolved, would_resolve
+
+
+def _prepare_initial_state(config: Config, out_dir: Path, *, dry_run: bool = False) -> _InitialState:
+    """Resolve the starting reference and (for BAM-start) extract remapping reads.
+
+    In a dry run, this only ever reads existing files (BAM headers, a given
+    local reference_fasta) -- it never writes into `out_dir`, sorts/indexes a
+    BAM, extracts FASTQs, or fetches an NCBI accession. The paths it returns
+    are the ones a real run would produce, so `preview()` can still render
+    accurate command lines against them; only their *contents* wouldn't
+    exist yet.
+    """
     input_spec = config.input
     if input_spec is None:
         raise RunnerError("no input specified: config needs an [input] section")
@@ -153,16 +231,20 @@ def _prepare_initial_state(config: Config, out_dir: Path) -> _InitialState:
 
     if input_spec.bam is not None:
         reference_name = resolve_reference_name(input_spec.bam, input_spec.reference_id)
-        record = resolve_reference(
+        resolved, would_resolve = _resolve_reference_avoiding_fetch_in_preview(
             reference_id=reference_name,
             reference_fasta=input_spec.reference_fasta,
             cache_dir=cache_dir,
+            dry_run=dry_run,
         )
         reference_path: Path | None = None
-        if record is not None:
-            _check_reference_matches_bam(record, input_spec.bam, reference_name)
+        if resolved is not None:
+            _check_reference_matches_bam(resolved.record, input_spec.bam, reference_name)
             reference_path = out_dir / "reference_initial.fasta"
-            write_fasta(reference_path, record.id, record.sequence)
+            if not dry_run:
+                _write_initial_reference(reference_path, resolved)
+        elif would_resolve:
+            reference_path = out_dir / "reference_initial.fasta"
         elif _consensus_uses_reference_placeholder(config.consensus):
             raise RunnerError(
                 "no reference is available for iteration 0 (BAM-start with no "
@@ -173,41 +255,55 @@ def _prepare_initial_state(config: Config, out_dir: Path) -> _InitialState:
                 "[input].reference_fasta, or set [input].reference_id to an NCBI accession."
             )
 
-        # Never rewrite the user's own input BAM: region queries below need
-        # it indexed (and, if it isn't already sorted, sorted) -- do that
-        # against a copy under reads_dir instead, if needed.
-        safe_bam = ensure_indexed_readonly(input_spec.bam, reads_dir)
-
-        extracted = extract_fastq(
-            safe_bam,
-            reference_name=reference_name,
-            mode=input_spec.bam_reads,
-            out_dir=reads_dir,
-        )
         starting_bam = reads_dir / "iteration_0_source.bam"
-        if not starting_bam.exists():
-            pysam.view(
-                "-b", "-o", str(starting_bam), str(safe_bam), reference_name, catch_stdout=False
+        if dry_run:
+            # The exact split into mate1/mate2/unpaired depends on what's
+            # actually in the BAM -- not knowable without extracting it, so
+            # this previews the paths for all three regardless of whether
+            # any particular run would end up populating them.
+            reads_values = {
+                "reads_1": ReadsList("reads_1", (reads_dir / "mate1.fastq.gz",)),
+                "reads_2": ReadsList("reads_2", (reads_dir / "mate2.fastq.gz",)),
+                "reads_single": ReadsList("reads_single", (reads_dir / "unpaired.fastq.gz",)),
+            }
+        else:
+            # Never rewrite the user's own input BAM: region queries below
+            # need it indexed (and, if it isn't already sorted, sorted) --
+            # do that against a copy under reads_dir instead, if needed.
+            safe_bam = ensure_indexed_readonly(input_spec.bam, reads_dir)
+            extracted = extract_fastq(
+                safe_bam,
+                reference_name=reference_name,
+                mode=input_spec.bam_reads,
+                out_dir=reads_dir,
             )
+            if not starting_bam.exists():
+                pysam.view(
+                    "-b", "-o", str(starting_bam), str(safe_bam), reference_name, catch_stdout=False
+                )
+            reads_values = _reads_values_from_extraction(extracted)
+
         return _InitialState(
-            reads_values=_reads_values_from_extraction(extracted),
+            reads_values=reads_values,
             starting_bam=starting_bam,
             reference_path=reference_path,
             iteration_0_needs_mapping=False,
         )
 
-    record = resolve_reference(
+    resolved, would_resolve = _resolve_reference_avoiding_fetch_in_preview(
         reference_id=input_spec.reference_id,
         reference_fasta=input_spec.reference_fasta,
         cache_dir=cache_dir,
+        dry_run=dry_run,
     )
-    if record is None:
+    if resolved is None and not would_resolve:
         raise RunnerError(
             "FASTQ-start needs a starting reference: give [input].reference_fasta, or set "
             "[input].reference_id to an NCBI accession"
         )
     reference_path = out_dir / "reference_initial.fasta"
-    write_fasta(reference_path, record.id, record.sequence)
+    if resolved is not None and not dry_run:
+        _write_initial_reference(reference_path, resolved)
     return _InitialState(
         reads_values=_reads_values_from_fastq(input_spec),
         starting_bam=None,
@@ -319,6 +415,24 @@ def _write_summary_json(
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
 
 
+def _write_final_output(output: OutputSpec | None, out_dir: Path, last_iteration: int) -> None:
+    """Copy the last iteration's consensus.fasta to `[output].consensus_fasta`, if set.
+
+    Always a real copy, never a symlink like reference_initial.fasta can be:
+    this is meant to be a small, standalone, portable deliverable, not a
+    reference back into out_dir's own working files.
+    """
+    if output is None or output.consensus_fasta is None:
+        return
+    consensus_path = out_dir / f"iter_{last_iteration:03d}" / "consensus.fasta"
+    record = parse_fasta(consensus_path.read_text())[0]
+    record_id = output.consensus_id if output.consensus_id is not None else record.id
+    try:
+        write_fasta(output.consensus_fasta, record_id, record.sequence)
+    except OSError as exc:
+        raise RunnerError(f"could not write [output].consensus_fasta '{output.consensus_fasta}': {exc}") from exc
+
+
 @dataclass(frozen=True)
 class _ResumeState:
     next_iteration: int
@@ -399,6 +513,7 @@ def run(
     resume = _load_resume_state(out_dir, config)
     if resume is not None and resume.converged:
         write_report(out_dir)
+        _write_final_output(config.output, out_dir, resume.records[-1].iteration)
         return RunResult(
             output_dir=out_dir,
             iterations=tuple(resume.records),
@@ -436,8 +551,8 @@ def run(
 
         if needs_mapping:
             base_values: dict[str, object] = {
+                **_run_level_values(config),
                 "reference": str(current_reference_path),
-                "threads": config.threads,
                 **state.reads_values,
             }
             current_bam_path = _run_mapping(config, iter_dir, base_values, cat_cache, log=True)
@@ -446,9 +561,9 @@ def run(
         reads_mapped = count_mapped_reads(current_bam_path)
 
         consensus_values: dict[str, object] = {
+            **_run_level_values(config),
             "bam": str(current_bam_path),
             "consensus_prefix": str(iter_dir / "consensus"),
-            "threads": config.threads,
         }
         if current_reference_path is not None:
             consensus_values["reference"] = str(current_reference_path)
@@ -497,6 +612,7 @@ def run(
     _write_metrics_tsv(out_dir, records)
     _write_summary_json(out_dir, records, converged, total_elapsed)
     write_report(out_dir)
+    _write_final_output(config.output, out_dir, records[-1].iteration)
     return RunResult(
         output_dir=out_dir,
         iterations=tuple(records),
@@ -520,8 +636,8 @@ def _preview_iteration(
 
     if needs_mapping:
         base_values: dict[str, object] = {
+            **_run_level_values(config),
             "reference": str(reference_path),
-            "threads": config.threads,
             **reads_values,
         }
         steps, bam_path = _plan_mapping(config, iter_dir, base_values, cat_cache)
@@ -531,9 +647,9 @@ def _preview_iteration(
 
     assert bam_path is not None
     consensus_values: dict[str, object] = {
+        **_run_level_values(config),
         "bam": str(bam_path),
         "consensus_prefix": str(iter_dir / "consensus"),
-        "threads": config.threads,
     }
     if reference_path is not None:
         consensus_values["reference"] = str(reference_path)
@@ -554,8 +670,8 @@ def preview(config: Config, out_dir: Path) -> DryRunPreview:
     0. Whether the loop continues past iteration 1 depends on convergence,
     which can only be determined by actually running the pipeline.
     """
-    cat_cache = ReadsCatCache(out_dir / "reads")
-    state = _prepare_initial_state(config, out_dir)
+    cat_cache = ReadsCatCache(out_dir / "reads", dry_run=True)
+    state = _prepare_initial_state(config, out_dir, dry_run=True)
 
     iter0_dir = out_dir / "iter_000"
     lines0 = _preview_iteration(

@@ -4,7 +4,13 @@ from pathlib import Path
 import pysam
 import pytest
 
-from iterated_consensus.config import Config, ConsensusSpec, InputSpec, Mapper
+from iterated_consensus.config import (
+    Config,
+    ConsensusSpec,
+    InputSpec,
+    Mapper,
+    OutputSpec,
+)
 from iterated_consensus.reference import ReferenceError
 from iterated_consensus.runner import RunnerError, preview, run
 
@@ -225,8 +231,79 @@ def test_preview_fastq_start_renders_iterations_0_and_1(tmp_path: Path) -> None:
     assert "iter_001" in result.lines[4]
     assert "iter_000" in result.lines[5] and "consensus.fasta" in result.lines[5]
     assert "always run" in result.note
-    assert not (tmp_path / "out" / "iter_000").exists()  # nothing actually run
-    assert not (tmp_path / "out" / "iter_001").exists()
+    assert not (tmp_path / "out").exists()  # nothing actually run, not even out_dir itself
+
+
+def test_run_section_extra_vars_available_in_mapper_and_consensus_commands(tmp_path: Path) -> None:
+    reference = tmp_path / "ref.fasta"
+    reference.write_text(">ref1\nACGT\n")
+    unpaired = tmp_path / "s.fastq"
+    unpaired.write_text("@r1\nACGT\n+\nIIII\n")
+
+    mapper = Mapper(
+        name="fake",
+        index_cmd=["true"],
+        map_cmd=[
+            sys.executable, str(FIXTURES / "make_fake_bam.py"), "{bam}", "--sort-threads={sort_threads}"
+        ],
+    )
+    config = Config(
+        mappers=(mapper,),
+        consensus=ConsensusSpec(
+            steps=(
+                [
+                    sys.executable, str(FIXTURES / "copy_fasta.py"), "{reference}", "{consensus_prefix}.fa",
+                    "--min-depth={min_depth}",
+                ],
+            ),
+            output="{consensus_prefix}.fa",
+        ),
+        input=InputSpec(reads_single=(unpaired,), reference_fasta=reference),
+        extra_vars={"sort_threads": 6, "min_depth": 10},
+    )
+    result = preview(config, tmp_path / "out")
+    assert any("--sort-threads=6" in line for line in result.lines)
+    assert any("--min-depth=10" in line for line in result.lines)
+
+
+def test_run_section_builtin_fields_are_also_placeholders(tmp_path: Path) -> None:
+    """threads/threads_reserve/max_iterations/convergence_identity/convergence_streak
+    are usable as {name} placeholders too, not just custom [run] variables --
+    e.g. for a logging step that records what a run was configured with."""
+    reference = tmp_path / "ref.fasta"
+    reference.write_text(">ref1\nACGT\n")
+    unpaired = tmp_path / "s.fastq"
+    unpaired.write_text("@r1\nACGT\n+\nIIII\n")
+
+    config = Config(
+        mappers=(_fake_bam_mapper(),),
+        consensus=ConsensusSpec(
+            steps=(
+                [
+                    "echo",
+                    "threads={threads}",
+                    "threads_reserve={threads_reserve}",
+                    "max_iterations={max_iterations}",
+                    "convergence_identity={convergence_identity}",
+                    "convergence_streak={convergence_streak}",
+                ],
+            ),
+            output="{consensus_prefix}.fa",
+        ),
+        input=InputSpec(reads_single=(unpaired,), reference_fasta=reference),
+        threads=6,
+        threads_reserve=2,
+        max_iterations=15,
+        convergence_identity=99.5,
+        convergence_streak=3,
+    )
+    result = preview(config, tmp_path / "out")
+    consensus_line = next(line for line in result.lines if "echo" in line)
+    assert "threads=6" in consensus_line
+    assert "threads_reserve=2" in consensus_line
+    assert "max_iterations=15" in consensus_line
+    assert "convergence_identity=99.5" in consensus_line
+    assert "convergence_streak=3" in consensus_line
 
 
 def test_preview_bam_start_iteration_0_has_no_mapping_lines(tmp_path: Path) -> None:
@@ -259,6 +336,49 @@ def test_preview_bam_start_iteration_0_has_no_mapping_lines(tmp_path: Path) -> N
     assert "make_fake_bam.py" in result.lines[2]
     assert "write_fixed_fasta.py" in result.lines[3]
     assert "no mapping step" in result.note
+    # Nothing actually run: no reads extracted, no BAM sorted/indexed, no
+    # out_dir (or reads/ under it) created at all.
+    assert not (tmp_path / "out").exists()
+
+
+def test_preview_bam_start_does_not_extract_reads_or_create_out_dir(tmp_path: Path) -> None:
+    """A dry run must not create out_dir, extract FASTQs into reads/, or sort/index
+    the input BAM -- it should only print the commands a real run would execute."""
+    bam_path = tmp_path / "input.bam"
+    header = {"HD": {"VN": "1.6"}, "SQ": [{"LN": 50, "SN": "chr1"}]}
+    with pysam.AlignmentFile(str(bam_path), "wb", header=header) as f:
+        segment = pysam.AlignedSegment()
+        segment.query_name = "r1"
+        segment.query_sequence = "ACGT"
+        segment.flag = 0
+        segment.reference_id = 0
+        segment.reference_start = 0
+        segment.mapping_quality = 60
+        segment.cigar = [(0, 4)]
+        segment.query_qualities = pysam.qualitystring_to_array("IIII")
+        f.write(segment)
+    original_bam_bytes = bam_path.read_bytes()
+
+    reads_aware_mapper = Mapper(
+        name="fake",
+        index_cmd=["true"],
+        map_cmd=[
+            sys.executable, str(FIXTURES / "make_fake_bam.py"), "{bam}", "{reads_1}", "{reads_2}"
+        ],
+    )
+    config = Config(
+        mappers=(reads_aware_mapper,),
+        consensus=_consensus_ignoring_reference(),
+        input=InputSpec(bam=bam_path),
+    )
+    out_dir = tmp_path / "out"
+    result = preview(config, out_dir)
+
+    assert not out_dir.exists()
+    assert not bam_path.with_suffix(".bam.bai").exists()
+    assert bam_path.read_bytes() == original_bam_bytes  # untouched
+    # iter 1's map_cmd still references plausible extracted-reads paths.
+    assert any("reads/mate1.fastq.gz" in line and "reads/mate2.fastq.gz" in line for line in result.lines)
 
 
 def _make_synthetic_bam(bam_path: Path, *, ref_name: str = "chr1", ref_length: int = 50) -> None:
@@ -397,6 +517,68 @@ def test_preview_bam_start_no_reference_but_consensus_needs_it_raises(tmp_path: 
         preview(config, tmp_path / "out")
 
 
+def test_run_symlinks_reference_initial_for_single_record_fastq_start(tmp_path: Path) -> None:
+    reference = tmp_path / "ref.fasta"
+    reference.write_text(">ref1\nACGTACGTACGTACGTACGT\n")
+    unpaired = tmp_path / "s.fastq"
+    unpaired.write_text("@r1\nACGT\n+\nIIII\n")
+
+    config = Config(
+        mappers=(_fake_bam_mapper(),),
+        consensus=_consensus_using_reference(),
+        input=InputSpec(reads_single=(unpaired,), reference_fasta=reference),
+        max_iterations=1,
+    )
+    out_dir = tmp_path / "out"
+    run(config, out_dir)
+
+    link = out_dir / "reference_initial.fasta"
+    assert link.is_symlink()
+    assert not link.readlink().is_absolute()
+    assert link.read_text() == reference.read_text()
+
+
+def test_run_symlinks_reference_initial_for_bam_start(tmp_path: Path) -> None:
+    bam_path = tmp_path / "input.bam"
+    _make_synthetic_bam(bam_path, ref_name="chr1", ref_length=20)
+    reference = tmp_path / "ref.fasta"
+    reference.write_text(">chr1\n" + "ACGT" * 5 + "\n")  # 20bp, matches the BAM header
+
+    config = Config(
+        mappers=(_fake_bam_mapper(),),
+        consensus=_consensus_using_reference(),
+        input=InputSpec(bam=bam_path, reference_fasta=reference),
+        max_iterations=1,
+    )
+    out_dir = tmp_path / "out"
+    run(config, out_dir)
+
+    link = out_dir / "reference_initial.fasta"
+    assert link.is_symlink()
+    assert not link.readlink().is_absolute()
+    assert link.read_text() == reference.read_text()
+
+
+def test_run_does_not_symlink_multi_record_reference(tmp_path: Path) -> None:
+    reference = tmp_path / "panel.fasta"
+    reference.write_text(">ref1\nACGTACGTACGTACGTACGT\n>ref2\nTTTT\n")
+    unpaired = tmp_path / "s.fastq"
+    unpaired.write_text("@r1\nACGT\n+\nIIII\n")
+
+    config = Config(
+        mappers=(_fake_bam_mapper(),),
+        consensus=_consensus_using_reference(),
+        input=InputSpec(reads_single=(unpaired,), reference_fasta=reference, reference_id="ref1"),
+        max_iterations=1,
+    )
+    out_dir = tmp_path / "out"
+    run(config, out_dir)
+
+    link = out_dir / "reference_initial.fasta"
+    assert not link.is_symlink()
+    assert link.read_text() == ">ref1\nACGTACGTACGTACGTACGT\n"
+
+
 def test_resume_continues_past_a_raised_max_iterations(tmp_path: Path) -> None:
     bam_path = tmp_path / "input.bam"
     _make_synthetic_bam(bam_path)
@@ -486,6 +668,97 @@ def test_resume_is_a_noop_once_already_converged(tmp_path: Path) -> None:
     assert second.converged
     assert second.iterations == first.iterations
     assert second.total_elapsed_seconds == first.total_elapsed_seconds
+
+
+def test_output_section_copies_final_consensus(tmp_path: Path) -> None:
+    bam_path = tmp_path / "input.bam"
+    _make_synthetic_bam(bam_path)
+
+    consensus = ConsensusSpec(
+        steps=([sys.executable, str(FIXTURES / "write_fixed_fasta.py"), "{consensus_prefix}.fa"],),
+        output="{consensus_prefix}.fa",
+    )
+    out_dir = tmp_path / "out"
+    final_path = tmp_path / "delivered" / "final.fasta"
+    config = Config(
+        mappers=(_fake_bam_mapper(),),
+        consensus=consensus,
+        input=InputSpec(bam=bam_path),
+        output=OutputSpec(consensus_fasta=final_path),
+        max_iterations=10,
+    )
+    result = run(config, out_dir)
+
+    assert result.converged
+    assert final_path.exists()
+    assert not final_path.is_symlink()  # a real, standalone copy
+    assert final_path.read_text() == f">seed\n{'ACGTACGTACGTACGTACGT'}\n"
+
+
+def test_output_section_renames_consensus_id(tmp_path: Path) -> None:
+    bam_path = tmp_path / "input.bam"
+    _make_synthetic_bam(bam_path)
+
+    consensus = ConsensusSpec(
+        steps=([sys.executable, str(FIXTURES / "write_fixed_fasta.py"), "{consensus_prefix}.fa"],),
+        output="{consensus_prefix}.fa",
+    )
+    out_dir = tmp_path / "out"
+    final_path = tmp_path / "final.fasta"
+    config = Config(
+        mappers=(_fake_bam_mapper(),),
+        consensus=consensus,
+        input=InputSpec(bam=bam_path),
+        output=OutputSpec(consensus_fasta=final_path, consensus_id="my-sample"),
+        max_iterations=10,
+    )
+    run(config, out_dir)
+
+    assert final_path.read_text() == f">my-sample\n{'ACGTACGTACGTACGTACGT'}\n"
+
+
+def test_output_section_written_on_resumed_already_converged_run(tmp_path: Path) -> None:
+    bam_path = tmp_path / "input.bam"
+    _make_synthetic_bam(bam_path)
+
+    consensus = ConsensusSpec(
+        steps=([sys.executable, str(FIXTURES / "write_fixed_fasta.py"), "{consensus_prefix}.fa"],),
+        output="{consensus_prefix}.fa",
+    )
+    out_dir = tmp_path / "out"
+    final_path = tmp_path / "final.fasta"
+    config = Config(
+        mappers=(_fake_bam_mapper(),),
+        consensus=consensus,
+        input=InputSpec(bam=bam_path),
+        output=OutputSpec(consensus_fasta=final_path),
+        max_iterations=10,
+    )
+    first = run(config, out_dir)
+    assert first.converged
+    final_path.unlink()  # prove the resumed (already-converged) call writes it again
+
+    second = run(config, out_dir)
+    assert second.converged
+    assert final_path.exists()
+
+
+def test_no_output_section_does_not_write_anything_extra(tmp_path: Path) -> None:
+    bam_path = tmp_path / "input.bam"
+    _make_synthetic_bam(bam_path)
+
+    consensus = ConsensusSpec(
+        steps=([sys.executable, str(FIXTURES / "write_fixed_fasta.py"), "{consensus_prefix}.fa"],),
+        output="{consensus_prefix}.fa",
+    )
+    out_dir = tmp_path / "out"
+    config = Config(
+        mappers=(_fake_bam_mapper(),),
+        consensus=consensus,
+        input=InputSpec(bam=bam_path),
+        max_iterations=10,
+    )
+    run(config, out_dir)  # output is None -- should not raise or write anything odd
 
 
 def test_resume_with_no_previous_run_behaves_like_fresh_run(tmp_path: Path) -> None:

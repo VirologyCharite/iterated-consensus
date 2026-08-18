@@ -19,11 +19,16 @@
 #       read-file lists. Expand with {reads_1}, {reads_1:,}, {prefix:reads_1},
 #       {prefix:reads_1:sep}, or {cat:reads_1} (concatenate to one file) --
 #       see the README for the full templating syntax.
+#
+# map_cmd below pipes bowtie2 into samtools sort, which run concurrently, so
+# {map_threads}/{sort_threads} (custom [run] variables, see the README's
+# "Threads and custom [run] variables") give each its own slice of
+# {threads} rather than both claiming the full count at once.
 
 [[mapper]]
 name = "bowtie2"
 index_cmd = ["bowtie2-build", "{reference}", "{index_prefix}"]
-map_cmd = "bowtie2 -x {index_prefix} -1 {reads_1:,} -2 {reads_2:,} -p {threads} --local | samtools sort -@ {threads} -o {bam}"
+map_cmd = "bowtie2 -x {index_prefix} -1 {reads_1:,} -2 {reads_2:,} -p {map_threads} --local | samtools sort -@ {sort_threads} -o {bam}"
 
 [consensus]
 steps = [
@@ -48,8 +53,23 @@ output = "{consensus_prefix}.fa"
 #   actual reference the BAM was aligned against)
 # bam_reads = "ref"          # one of: ref, ref+unal, all
 
+[output]
+# Optional: copy the last iteration's consensus out to a location/name of
+# your choosing once the run finishes, converged or not. Leave this whole
+# section out if you're happy just reading iter_NNN/consensus.fasta
+# directly from --out-dir.
+# consensus_fasta = "final_consensus.fasta"   # where to copy it to
+# consensus_id = "my-sample-name"              # optional -- the FASTA header
+#   to give it; if omitted, keeps whatever id the consensus tool itself used
+
 [run]
-threads = 4
+threads = 4                    # or "auto" -- see the README
 max_iterations = 20
 convergence_identity = 100.0
 convergence_streak = 1
+
+# map_cmd above pipes two programs together, so they split {threads} rather
+# than each claiming all of it -- adjust to taste, but keep the two roughly
+# summing to no more than threads.
+map_threads = 3
+sort_threads = 1
