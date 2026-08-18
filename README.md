@@ -1,5 +1,8 @@
 # Iterated consensus sequence
 
+*NOTE* This package is only a day old, so you should expect occasional
+breaking changes!
+
 Iteratively build a consensus sequence: call a consensus from a BAM
 (or an initial reference), build a mapper index from it, remap the
 original reads against it, call a new consensus, and repeat until the
@@ -63,9 +66,9 @@ steps = [
 output = "{consensus_prefix}.fa"   # where the harness should find the result
 
 [input]
-mate1 = ["a_R1.fastq.gz", "b_R1.fastq.gz"]   # 0 or more paired sets
-mate2 = ["a_R2.fastq.gz", "b_R2.fastq.gz"]
-unpaired = []                                 # 0 or more single-end files
+reads_1 = ["a_R1.fastq.gz", "b_R1.fastq.gz"]  # 0 or more paired sets
+reads_2 = ["a_R2.fastq.gz", "b_R2.fastq.gz"]
+reads_single = []                             # 0 or more single-end files
 reference_fasta = "starting_reference.fasta"  # a local file...
 # reference_id = "chr2"        # ...and/or a name -- see "Reference resolution" below
 # --- or, instead of the FASTQ block above, start from a BAM: ---
@@ -127,11 +130,11 @@ this).
 - `{bam}` -- path this mapper should write its BAM to.
 - `{consensus_prefix}` -- path prefix for the consensus step's output.
 - `{threads}` -- from `[run]` threads.
-- `{reads_1}`, `{reads_2}`, `{reads_single}` -- the read-file lists (mate1,
-  mate2, unpaired). Only present if that category is non-empty for this run
-  -- referencing e.g. `{reads_single}` in a run with no unpaired reads is a
-  config error, so a mapper template should only reference the categories it
-  actually expects.
+- `{reads_1}`, `{reads_2}`, `{reads_single}` -- the read-file lists, matching
+  `[input]`'s `reads_1`/`reads_2`/`reads_single` one-for-one. Only present if
+  that category is non-empty for this run -- referencing e.g.
+  `{reads_single}` in a run with no unpaired reads is a config error, so a
+  mapper template should only reference the categories it actually expects.
 
 ### Read-list expansion syntax
 
@@ -216,6 +219,30 @@ contig name exactly, and its sequence length must match the BAM header's
 length for that contig exactly. A mismatch aborts the run immediately --
 proceeding would mean calling a pileup-based consensus against a reference
 the BAM's own coordinates don't actually match, silently producing garbage.
+
+### Convergence: `convergence_identity` and `convergence_streak`
+
+Every iteration from 1 onward computes the identity between its new
+consensus and the previous one (iteration 0 has nothing to compare against,
+so it's skipped). That identity feeds a streak counter: it increments
+whenever `identity >= convergence_identity`, and resets to 0 otherwise. The
+run stops, reported as converged, once the streak reaches
+`convergence_streak` -- i.e. once `convergence_streak` *consecutive*
+iterations have each been at or above `convergence_identity`. If that never
+happens, the run stops anyway once `max_iterations` is reached, just
+reported as not converged.
+
+With the defaults (`convergence_identity = 100.0`, `convergence_streak =
+1`), a run stops as soon as one iteration produces a consensus identical to
+the one before it. Raising `convergence_streak` (e.g. to 2 or 3) guards
+against declaring convergence on a fluke -- a sequence could hit exactly
+100% once by chance (e.g. a low-coverage region that happens to resolve to
+the same majority base) and then drift again next iteration; requiring
+several consecutive matches is a stronger signal that it's genuinely
+settled. Lowering `convergence_identity` below 100 is also legitimate --
+useful for a sample that may never perfectly stabilize (e.g. a genuinely
+heterogeneous/mixed population), where "close enough" is a more realistic
+stopping condition than exact equality.
 
 ## Output
 

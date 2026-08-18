@@ -66,13 +66,13 @@ def run_cmd(
         str | None,
         typer.Option(help="Reads to extract from --bam for remapping: ref, ref+unal, or all."),
     ] = None,
-    mate1: Annotated[
+    reads_1: Annotated[
         str | None, typer.Option("-1", help="Comma-separated mate-1 FASTQ file(s).")
     ] = None,
-    mate2: Annotated[
+    reads_2: Annotated[
         str | None, typer.Option("-2", help="Comma-separated mate-2 FASTQ file(s).")
     ] = None,
-    unpaired: Annotated[
+    reads_single: Annotated[
         str | None, typer.Option("-U", help="Comma-separated unpaired FASTQ file(s).")
     ] = None,
     reference_fasta: Annotated[
@@ -94,9 +94,9 @@ def run_cmd(
     try:
         config = load_config(config_path)
         overrides = InputOverrides(
-            mate1=parse_file_list(mate1) if mate1 is not None else None,
-            mate2=parse_file_list(mate2) if mate2 is not None else None,
-            unpaired=parse_file_list(unpaired) if unpaired is not None else None,
+            reads_1=parse_file_list(reads_1) if reads_1 is not None else None,
+            reads_2=parse_file_list(reads_2) if reads_2 is not None else None,
+            reads_single=parse_file_list(reads_single) if reads_single is not None else None,
             reference_fasta=reference_fasta,
             reference_id=reference_id,
             bam=bam,
@@ -146,7 +146,10 @@ def config_template_cmd(
             typer.echo(f"{preset_name}\t{description}")
         return
     try:
-        typer.echo(get_preset_text(name))
+        # get_preset_text() already ends with its own trailing newline;
+        # echo's default nl=True would add a second one, printing a stray
+        # blank line at the end.
+        typer.echo(get_preset_text(name), nl=False)
     except PresetError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1) from None

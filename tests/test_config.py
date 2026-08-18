@@ -30,15 +30,15 @@ output = "{consensus_prefix}.fa"
 def test_minimal_valid_config_with_fastq_input() -> None:
     text = MAPPER + CONSENSUS + """
 [input]
-mate1 = ["a_R1.fq", "b_R1.fq"]
-mate2 = ["a_R2.fq", "b_R2.fq"]
+reads_1 = ["a_R1.fq", "b_R1.fq"]
+reads_2 = ["a_R2.fq", "b_R2.fq"]
 reference_fasta = "ref.fasta"
 """
     config = parse_config(text)
     assert config.mappers[0].name == "bowtie2"
     assert config.consensus.output == "{consensus_prefix}.fa"
     assert config.input is not None
-    assert config.input.mate1 == (Path("a_R1.fq"), Path("b_R1.fq"))
+    assert config.input.reads_1 == (Path("a_R1.fq"), Path("b_R1.fq"))
     assert config.input.reference_fasta == Path("ref.fasta")
     assert config.input.bam_reads == "ref"
 
@@ -60,7 +60,7 @@ bam_reads = "ref+unal"
 def test_run_section_overrides_defaults() -> None:
     text = MAPPER + CONSENSUS + """
 [input]
-unpaired = ["s.fq"]
+reads_single = ["s.fq"]
 reference_id = "NC_045512.2"
 
 [run]
@@ -104,7 +104,7 @@ steps = ["samtools mpileup -f {reference} {bam}"]
 def test_input_both_fastq_and_bam_raises() -> None:
     text = MAPPER + CONSENSUS + """
 [input]
-unpaired = ["s.fq"]
+reads_single = ["s.fq"]
 reference_fasta = "ref.fasta"
 bam = "input.bam"
 """
@@ -118,11 +118,11 @@ def test_input_neither_fastq_nor_bam_raises() -> None:
         parse_config(text)
 
 
-def test_mate_length_mismatch_raises() -> None:
+def test_reads_1_reads_2_length_mismatch_raises() -> None:
     text = MAPPER + CONSENSUS + """
 [input]
-mate1 = ["a_R1.fq", "b_R1.fq"]
-mate2 = ["a_R2.fq"]
+reads_1 = ["a_R1.fq", "b_R1.fq"]
+reads_2 = ["a_R2.fq"]
 reference_fasta = "ref.fasta"
 """
     with pytest.raises(ConfigError, match="pair up"):
@@ -132,7 +132,7 @@ reference_fasta = "ref.fasta"
 def test_fastq_input_missing_reference_raises() -> None:
     text = MAPPER + CONSENSUS + """
 [input]
-unpaired = ["s.fq"]
+reads_single = ["s.fq"]
 """
     with pytest.raises(ConfigError, match="starting reference"):
         parse_config(text)
@@ -144,7 +144,7 @@ def test_fastq_input_reference_id_alone_is_valid_at_config_level() -> None:
     # *something* was given.
     text = MAPPER + CONSENSUS + """
 [input]
-unpaired = ["s.fq"]
+reads_single = ["s.fq"]
 reference_id = "NC_045512.2"
 """
     config = parse_config(text)
@@ -193,7 +193,7 @@ bam_reads = "everything"
 def test_invalid_convergence_identity_raises() -> None:
     text = MAPPER + CONSENSUS + """
 [input]
-unpaired = ["s.fq"]
+reads_single = ["s.fq"]
 reference_fasta = "ref.fasta"
 
 [run]
@@ -223,22 +223,22 @@ def test_parse_file_list_single_file() -> None:
 
 
 def test_apply_input_overrides_on_blank_base() -> None:
-    overrides = InputOverrides(unpaired=(Path("s.fq"),), reference_fasta=Path("ref.fa"))
+    overrides = InputOverrides(reads_single=(Path("s.fq"),), reference_fasta=Path("ref.fa"))
     merged = apply_input_overrides(None, overrides)
-    assert merged.unpaired == (Path("s.fq"),)
+    assert merged.reads_single == (Path("s.fq"),)
     assert merged.reference_fasta == Path("ref.fa")
 
 
 def test_apply_input_overrides_cli_wins_over_config() -> None:
-    base = InputSpec(unpaired=(Path("config_s.fq"),), reference_fasta=Path("config_ref.fa"))
-    overrides = InputOverrides(unpaired=(Path("cli_s.fq"),))
+    base = InputSpec(reads_single=(Path("config_s.fq"),), reference_fasta=Path("config_ref.fa"))
+    overrides = InputOverrides(reads_single=(Path("cli_s.fq"),))
     merged = apply_input_overrides(base, overrides)
-    assert merged.unpaired == (Path("cli_s.fq"),)
+    assert merged.reads_single == (Path("cli_s.fq"),)
     assert merged.reference_fasta == Path("config_ref.fa")  # untouched
 
 
 def test_apply_input_overrides_validates_result() -> None:
     base = InputSpec(bam=Path("in.bam"))
-    overrides = InputOverrides(unpaired=(Path("s.fq"),), reference_fasta=Path("ref.fa"))
+    overrides = InputOverrides(reads_single=(Path("s.fq"),), reference_fasta=Path("ref.fa"))
     with pytest.raises(ConfigError, match="not both"):
         apply_input_overrides(base, overrides)

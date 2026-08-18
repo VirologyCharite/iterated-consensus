@@ -27,8 +27,11 @@ output = "{consensus_prefix}.fa"
 
 [input]
 # --- FASTQ start ---
-# mate1 = ["reads_R1.fastq.gz"]
-# mate2 = ["reads_R2.fastq.gz"]
+# reads_1 = ["reads_R1.fastq.gz"]
+# reads_2 = ["reads_R2.fastq.gz"]
+# reads_single = ["reads_unpaired.fastq.gz"]      # optional; map_cmd above
+#   doesn't use {reads_single} (bwa mem here only handles pairs) -- add a
+#   {cat:reads_single} step yourself if you need unpaired reads mapped too.
 # reference_fasta = "starting_reference.fasta"   # a local file...
 # reference_id = "NC_045512.2"                    # ...and/or a name: picks a
 #   record out of a multi-sequence reference_fasta, or (with no

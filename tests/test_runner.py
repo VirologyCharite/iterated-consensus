@@ -31,7 +31,7 @@ def test_fastq_start_converges_and_writes_outputs(tmp_path: Path) -> None:
             steps=([sys.executable, str(FIXTURES / "copy_fasta.py"), "{reference}", "{consensus_prefix}.fa"],),
             output="{consensus_prefix}.fa",
         ),
-        input=InputSpec(unpaired=(unpaired,), reference_fasta=reference),
+        input=InputSpec(reads_single=(unpaired,), reference_fasta=reference),
         threads=1,
         max_iterations=10,
         convergence_identity=100.0,
@@ -75,7 +75,7 @@ def test_on_iteration_callback_fires_once_per_executed_iteration(tmp_path: Path)
             steps=([sys.executable, str(FIXTURES / "copy_fasta.py"), "{reference}", "{consensus_prefix}.fa"],),
             output="{consensus_prefix}.fa",
         ),
-        input=InputSpec(unpaired=(unpaired,), reference_fasta=reference),
+        input=InputSpec(reads_single=(unpaired,), reference_fasta=reference),
     )
 
     seen: list[int] = []
@@ -176,7 +176,7 @@ def test_run_sorts_and_indexes_unsorted_mapper_output(tmp_path: Path) -> None:
             steps=([sys.executable, str(FIXTURES / "write_fixed_fasta.py"), "{consensus_prefix}.fa"],),
             output="{consensus_prefix}.fa",
         ),
-        input=InputSpec(unpaired=(unpaired,), reference_fasta=reference),
+        input=InputSpec(reads_single=(unpaired,), reference_fasta=reference),
         max_iterations=1,
     )
     out_dir = tmp_path / "out"
@@ -211,7 +211,7 @@ def test_preview_fastq_start_renders_iterations_0_and_1(tmp_path: Path) -> None:
             steps=([sys.executable, str(FIXTURES / "copy_fasta.py"), "{reference}", "{consensus_prefix}.fa"],),
             output="{consensus_prefix}.fa",
         ),
-        input=InputSpec(unpaired=(unpaired,), reference_fasta=reference),
+        input=InputSpec(reads_single=(unpaired,), reference_fasta=reference),
     )
     result = preview(config, tmp_path / "out")
     assert len(result.lines) == 6  # iter 0: index, map, consensus; iter 1: same shape

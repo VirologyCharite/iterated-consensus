@@ -96,11 +96,11 @@ class DryRunPreview:
 
 def _reads_values_from_fastq(input_spec: InputSpec) -> dict[str, object]:
     values: dict[str, object] = {}
-    if input_spec.mate1:
-        values["reads_1"] = ReadsList("reads_1", input_spec.mate1)
-        values["reads_2"] = ReadsList("reads_2", input_spec.mate2)
-    if input_spec.unpaired:
-        values["reads_single"] = ReadsList("reads_single", input_spec.unpaired)
+    if input_spec.reads_1:
+        values["reads_1"] = ReadsList("reads_1", input_spec.reads_1)
+        values["reads_2"] = ReadsList("reads_2", input_spec.reads_2)
+    if input_spec.reads_single:
+        values["reads_single"] = ReadsList("reads_single", input_spec.reads_single)
     return values
 
 

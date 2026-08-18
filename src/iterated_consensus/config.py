@@ -38,30 +38,30 @@ class ConsensusSpec:
 
 @dataclass(frozen=True)
 class InputSpec:
-    mate1: tuple[Path, ...] = ()
-    mate2: tuple[Path, ...] = ()
-    unpaired: tuple[Path, ...] = ()
+    reads_1: tuple[Path, ...] = ()
+    reads_2: tuple[Path, ...] = ()
+    reads_single: tuple[Path, ...] = ()
     reference_fasta: Path | None = None
     reference_id: str | None = None
     bam: Path | None = None
     bam_reads: BamReadsMode = "ref"
 
     def validate(self) -> None:
-        have_fastq = bool(self.mate1 or self.mate2 or self.unpaired)
+        have_fastq = bool(self.reads_1 or self.reads_2 or self.reads_single)
         have_bam = self.bam is not None
         if have_fastq and have_bam:
-            raise ConfigError("specify FASTQ input (mate1/mate2/unpaired) or bam, not both")
+            raise ConfigError("specify FASTQ input (reads_1/reads_2/reads_single) or bam, not both")
         if not have_fastq and not have_bam:
             raise ConfigError("no input given: specify FASTQ input or bam")
 
         if have_fastq:
-            if len(self.mate1) != len(self.mate2):
+            if len(self.reads_1) != len(self.reads_2):
                 raise ConfigError(
-                    f"mate1 has {len(self.mate1)} file(s) but mate2 has "
-                    f"{len(self.mate2)}; they must pair up 1:1"
+                    f"reads_1 has {len(self.reads_1)} file(s) but reads_2 has "
+                    f"{len(self.reads_2)}; they must pair up 1:1"
                 )
-            if not self.mate1 and not self.unpaired:
-                raise ConfigError("FASTQ input needs mate1/mate2 pairs and/or unpaired reads")
+            if not self.reads_1 and not self.reads_single:
+                raise ConfigError("FASTQ input needs reads_1/reads_2 pairs and/or reads_single reads")
             if self.reference_fasta is None and self.reference_id is None:
                 raise ConfigError(
                     "FASTQ input needs a starting reference (reference_fasta and/or reference_id)"
@@ -81,9 +81,9 @@ class InputSpec:
 class InputOverrides:
     """CLI-supplied input fields; each `None` means "leave the config value as-is"."""
 
-    mate1: tuple[Path, ...] | None = None
-    mate2: tuple[Path, ...] | None = None
-    unpaired: tuple[Path, ...] | None = None
+    reads_1: tuple[Path, ...] | None = None
+    reads_2: tuple[Path, ...] | None = None
+    reads_single: tuple[Path, ...] | None = None
     reference_fasta: Path | None = None
     reference_id: str | None = None
     bam: Path | None = None
@@ -99,9 +99,9 @@ def apply_input_overrides(base: InputSpec | None, overrides: InputOverrides) -> 
     """Layer CLI-supplied input fields over a config's [input] section (or a blank one)."""
     base = base if base is not None else InputSpec()
     merged = InputSpec(
-        mate1=overrides.mate1 if overrides.mate1 is not None else base.mate1,
-        mate2=overrides.mate2 if overrides.mate2 is not None else base.mate2,
-        unpaired=overrides.unpaired if overrides.unpaired is not None else base.unpaired,
+        reads_1=overrides.reads_1 if overrides.reads_1 is not None else base.reads_1,
+        reads_2=overrides.reads_2 if overrides.reads_2 is not None else base.reads_2,
+        reads_single=overrides.reads_single if overrides.reads_single is not None else base.reads_single,
         reference_fasta=(
             overrides.reference_fasta if overrides.reference_fasta is not None else base.reference_fasta
         ),
@@ -197,9 +197,9 @@ def _parse_input(raw: dict) -> InputSpec:
     reference_fasta = raw.get("reference_fasta")
     bam = raw.get("bam")
     return InputSpec(
-        mate1=_paths(raw.get("mate1"), "[input] mate1"),
-        mate2=_paths(raw.get("mate2"), "[input] mate2"),
-        unpaired=_paths(raw.get("unpaired"), "[input] unpaired"),
+        reads_1=_paths(raw.get("reads_1"), "[input] reads_1"),
+        reads_2=_paths(raw.get("reads_2"), "[input] reads_2"),
+        reads_single=_paths(raw.get("reads_single"), "[input] reads_single"),
         reference_fasta=Path(reference_fasta) if reference_fasta is not None else None,
         reference_id=raw.get("reference_id"),
         bam=Path(bam) if bam is not None else None,

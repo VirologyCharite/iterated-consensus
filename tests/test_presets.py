@@ -20,7 +20,7 @@ def test_preset_text_is_valid_config_once_input_filled_in(name: str) -> None:
     # it with a minimal real one so the bundled mapper/consensus commands
     # themselves parse and validate.
     text_with_input = text.replace(
-        "[input]\n", '[input]\nunpaired = ["s.fq"]\nreference_fasta = "ref.fa"\n', 1
+        "[input]\n", '[input]\nreads_single = ["s.fq"]\nreference_fasta = "ref.fa"\n', 1
     )
     config = parse_config(text_with_input)
     assert config.mappers
