@@ -1,6 +1,6 @@
 [project]
 name = "iterated-consensus"
-version = "0.1.2"
+version = "0.2.0"
 description = "Iteratively build a consensus sequence from a BAM/FASTQ by remapping against each new consensus until convergence."
 readme = "README.md"
 authors = [

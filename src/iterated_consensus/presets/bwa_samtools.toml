@@ -29,13 +29,16 @@ output = "{consensus_prefix}.fa"
 # --- FASTQ start ---
 # mate1 = ["reads_R1.fastq.gz"]
 # mate2 = ["reads_R2.fastq.gz"]
-# reference = "starting_reference.fasta"
-# # ...or fetch the starting reference from NCBI instead of a local file:
-# # accession = "NC_045512.2"
+# reference_fasta = "starting_reference.fasta"   # a local file...
+# reference_id = "NC_045512.2"                    # ...and/or a name: picks a
+#   record out of a multi-sequence reference_fasta, or (with no
+#   reference_fasta at all) an NCBI accession to fetch automatically.
 
 # --- BAM start (use this instead of the FASTQ block above) ---
 # bam = "input.bam"
 # reference_id = "chr1"     # only needed if the BAM has more than one reference
+#   (reference_fasta is also usable here, same as above, e.g. to give the
+#   actual reference the BAM was aligned against)
 # bam_reads = "ref"          # one of: ref, ref+unal, all
 
 [run]

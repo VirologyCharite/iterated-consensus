@@ -22,8 +22,10 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from .errors import IteratedConsensusError
 
-class TemplateError(ValueError):
+
+class TemplateError(IteratedConsensusError, ValueError):
     """Raised for malformed placeholders or invalid template values."""
 
 

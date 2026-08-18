@@ -32,14 +32,14 @@ def test_minimal_valid_config_with_fastq_input() -> None:
 [input]
 mate1 = ["a_R1.fq", "b_R1.fq"]
 mate2 = ["a_R2.fq", "b_R2.fq"]
-reference = "ref.fasta"
+reference_fasta = "ref.fasta"
 """
     config = parse_config(text)
     assert config.mappers[0].name == "bowtie2"
     assert config.consensus.output == "{consensus_prefix}.fa"
     assert config.input is not None
     assert config.input.mate1 == (Path("a_R1.fq"), Path("b_R1.fq"))
-    assert config.input.reference == Path("ref.fasta")
+    assert config.input.reference_fasta == Path("ref.fasta")
     assert config.input.bam_reads == "ref"
 
 
@@ -61,7 +61,7 @@ def test_run_section_overrides_defaults() -> None:
     text = MAPPER + CONSENSUS + """
 [input]
 unpaired = ["s.fq"]
-accession = "NC_045512.2"
+reference_id = "NC_045512.2"
 
 [run]
 threads = 8
@@ -105,7 +105,7 @@ def test_input_both_fastq_and_bam_raises() -> None:
     text = MAPPER + CONSENSUS + """
 [input]
 unpaired = ["s.fq"]
-reference = "ref.fasta"
+reference_fasta = "ref.fasta"
 bam = "input.bam"
 """
     with pytest.raises(ConfigError, match="not both"):
@@ -123,7 +123,7 @@ def test_mate_length_mismatch_raises() -> None:
 [input]
 mate1 = ["a_R1.fq", "b_R1.fq"]
 mate2 = ["a_R2.fq"]
-reference = "ref.fasta"
+reference_fasta = "ref.fasta"
 """
     with pytest.raises(ConfigError, match="pair up"):
         parse_config(text)
@@ -138,25 +138,46 @@ unpaired = ["s.fq"]
         parse_config(text)
 
 
-def test_fastq_input_both_reference_and_accession_raises() -> None:
+def test_fastq_input_reference_id_alone_is_valid_at_config_level() -> None:
+    # Whether "NC_045512.2" actually resolves to something fetchable is a
+    # runtime concern (see runner.py) -- config validation only checks that
+    # *something* was given.
     text = MAPPER + CONSENSUS + """
 [input]
 unpaired = ["s.fq"]
-reference = "ref.fasta"
-accession = "NC_045512.2"
+reference_id = "NC_045512.2"
 """
-    with pytest.raises(ConfigError, match="not both"):
-        parse_config(text)
+    config = parse_config(text)
+    assert config.input is not None
+    assert config.input.reference_fasta is None
+    assert config.input.reference_id == "NC_045512.2"
 
 
-def test_bam_input_with_reference_raises() -> None:
+def test_bam_input_with_reference_fasta_is_allowed() -> None:
     text = MAPPER + CONSENSUS + """
 [input]
 bam = "input.bam"
-reference = "ref.fasta"
+reference_fasta = "ref.fasta"
 """
-    with pytest.raises(ConfigError, match="only apply when starting from FASTQ"):
-        parse_config(text)
+    config = parse_config(text)
+    assert config.input is not None
+    assert config.input.bam == Path("input.bam")
+    assert config.input.reference_fasta == Path("ref.fasta")
+
+
+def test_bam_input_with_reference_fasta_and_reference_id_together() -> None:
+    # Not mutually exclusive: reference_id picks a record out of a
+    # multi-sequence reference_fasta (and doubles as the BAM contig to use).
+    text = MAPPER + CONSENSUS + """
+[input]
+bam = "input.bam"
+reference_fasta = "panel.fasta"
+reference_id = "chr2"
+"""
+    config = parse_config(text)
+    assert config.input is not None
+    assert config.input.reference_fasta == Path("panel.fasta")
+    assert config.input.reference_id == "chr2"
 
 
 def test_invalid_bam_reads_raises() -> None:
@@ -173,7 +194,7 @@ def test_invalid_convergence_identity_raises() -> None:
     text = MAPPER + CONSENSUS + """
 [input]
 unpaired = ["s.fq"]
-reference = "ref.fasta"
+reference_fasta = "ref.fasta"
 
 [run]
 convergence_identity = 150
@@ -202,22 +223,22 @@ def test_parse_file_list_single_file() -> None:
 
 
 def test_apply_input_overrides_on_blank_base() -> None:
-    overrides = InputOverrides(unpaired=(Path("s.fq"),), reference=Path("ref.fa"))
+    overrides = InputOverrides(unpaired=(Path("s.fq"),), reference_fasta=Path("ref.fa"))
     merged = apply_input_overrides(None, overrides)
     assert merged.unpaired == (Path("s.fq"),)
-    assert merged.reference == Path("ref.fa")
+    assert merged.reference_fasta == Path("ref.fa")
 
 
 def test_apply_input_overrides_cli_wins_over_config() -> None:
-    base = InputSpec(unpaired=(Path("config_s.fq"),), reference=Path("config_ref.fa"))
+    base = InputSpec(unpaired=(Path("config_s.fq"),), reference_fasta=Path("config_ref.fa"))
     overrides = InputOverrides(unpaired=(Path("cli_s.fq"),))
     merged = apply_input_overrides(base, overrides)
     assert merged.unpaired == (Path("cli_s.fq"),)
-    assert merged.reference == Path("config_ref.fa")  # untouched
+    assert merged.reference_fasta == Path("config_ref.fa")  # untouched
 
 
 def test_apply_input_overrides_validates_result() -> None:
     base = InputSpec(bam=Path("in.bam"))
-    overrides = InputOverrides(unpaired=(Path("s.fq"),), reference=Path("ref.fa"))
+    overrides = InputOverrides(unpaired=(Path("s.fq"),), reference_fasta=Path("ref.fa"))
     with pytest.raises(ConfigError, match="not both"):
         apply_input_overrides(base, overrides)

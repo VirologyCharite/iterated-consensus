@@ -43,10 +43,16 @@ from pathlib import Path
 
 import pysam
 
-from .bam import count_mapped_reads, extract_fastq, resolve_reference_name
+from .bam import (
+    count_mapped_reads,
+    extract_fastq,
+    get_reference_length,
+    resolve_reference_name,
+)
 from .commands import RenderedCommand, render_command, run_command
-from .config import Config, InputSpec
+from .config import Config, ConsensusSpec, InputSpec
 from .consensus import ConsensusResult, run_consensus
+from .errors import IteratedConsensusError
 from .metrics import (
     ConvergenceState,
     base_composition,
@@ -54,12 +60,12 @@ from .metrics import (
     sequence_identity,
 )
 from .reads import ReadsCatCache
-from .reference import fetch_ncbi_accession, load_reference, parse_fasta, write_fasta
+from .reference import FastaRecord, parse_fasta, resolve_reference, write_fasta
 from .report import write_report
 from .templating import ReadsList
 
 
-class RunnerError(RuntimeError):
+class RunnerError(IteratedConsensusError, RuntimeError):
     """Raised for run-level setup failures (bad/missing input, etc.)."""
 
 
@@ -110,8 +116,29 @@ def _reads_values_from_extraction(extracted: dict[str, Path]) -> dict[str, objec
 class _InitialState:
     reads_values: dict[str, object]
     starting_bam: Path | None  # set only for a BAM-origin run
-    reference_path: Path | None  # None until iteration 0 produces a consensus
+    reference_path: Path | None  # may still be None for a BAM-start run -- see _prepare_initial_state
     iteration_0_needs_mapping: bool
+
+
+def _check_reference_matches_bam(record: FastaRecord, bam_path: Path, reference_name: str) -> None:
+    if record.id != reference_name:
+        raise RunnerError(
+            f"reference sequence id '{record.id}' does not match BAM reference '{reference_name}'"
+        )
+    bam_length = get_reference_length(bam_path, reference_name)
+    if len(record.sequence) != bam_length:
+        raise RunnerError(
+            f"reference '{reference_name}' is {len(record.sequence)} bp, but the BAM header says "
+            f"'{reference_name}' is {bam_length} bp -- these must match exactly"
+        )
+
+
+def _consensus_uses_reference_placeholder(consensus: ConsensusSpec) -> bool:
+    for step in consensus.steps:
+        texts = step if isinstance(step, list) else (step,)
+        if any("{reference}" in text for text in texts):
+            return True
+    return False
 
 
 def _prepare_initial_state(config: Config, out_dir: Path) -> _InitialState:
@@ -120,9 +147,30 @@ def _prepare_initial_state(config: Config, out_dir: Path) -> _InitialState:
         raise RunnerError("no input specified: config needs an [input] section")
     input_spec.validate()
     reads_dir = out_dir / "reads"
+    cache_dir = out_dir / "reference_cache"
 
     if input_spec.bam is not None:
         reference_name = resolve_reference_name(input_spec.bam, input_spec.reference_id)
+        record = resolve_reference(
+            reference_id=reference_name,
+            reference_fasta=input_spec.reference_fasta,
+            cache_dir=cache_dir,
+        )
+        reference_path: Path | None = None
+        if record is not None:
+            _check_reference_matches_bam(record, input_spec.bam, reference_name)
+            reference_path = out_dir / "reference_initial.fasta"
+            write_fasta(reference_path, record.id, record.sequence)
+        elif _consensus_uses_reference_placeholder(config.consensus):
+            raise RunnerError(
+                "no reference is available for iteration 0 (BAM-start with no "
+                "[input].reference_fasta given, and contig "
+                f"'{reference_name}' doesn't look like an NCBI accession), but [consensus] steps "
+                "use {reference} -- this can never succeed, since iteration 0 always runs first "
+                "and has no previously-computed consensus to fall back on. Give "
+                "[input].reference_fasta, or set [input].reference_id to an NCBI accession."
+            )
+
         extracted = extract_fastq(
             input_spec.bam,
             reference_name=reference_name,
@@ -137,16 +185,20 @@ def _prepare_initial_state(config: Config, out_dir: Path) -> _InitialState:
         return _InitialState(
             reads_values=_reads_values_from_extraction(extracted),
             starting_bam=starting_bam,
-            reference_path=None,
+            reference_path=reference_path,
             iteration_0_needs_mapping=False,
         )
 
-    if input_spec.reference is not None:
-        record = load_reference(input_spec.reference, input_spec.reference_id)
-    else:
-        assert input_spec.accession is not None
-        fasta_path = fetch_ncbi_accession(input_spec.accession, out_dir / "reference_cache")
-        record = load_reference(fasta_path)
+    record = resolve_reference(
+        reference_id=input_spec.reference_id,
+        reference_fasta=input_spec.reference_fasta,
+        cache_dir=cache_dir,
+    )
+    if record is None:
+        raise RunnerError(
+            "FASTQ-start needs a starting reference: give [input].reference_fasta, or set "
+            "[input].reference_id to an NCBI accession"
+        )
     reference_path = out_dir / "reference_initial.fasta"
     write_fasta(reference_path, record.id, record.sequence)
     return _InitialState(

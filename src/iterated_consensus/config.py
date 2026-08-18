@@ -12,12 +12,14 @@ if sys.version_info >= (3, 11):
 else:
     import tomli as tomllib
 
+from .errors import IteratedConsensusError
+
 CommandStep = str | list[str]
 BamReadsMode = Literal["ref", "ref+unal", "all"]
 _VALID_BAM_READS_MODES = ("ref", "ref+unal", "all")
 
 
-class ConfigError(ValueError):
+class ConfigError(IteratedConsensusError, ValueError):
     """Raised for malformed or inconsistent configuration."""
 
 
@@ -39,8 +41,7 @@ class InputSpec:
     mate1: tuple[Path, ...] = ()
     mate2: tuple[Path, ...] = ()
     unpaired: tuple[Path, ...] = ()
-    reference: Path | None = None
-    accession: str | None = None
+    reference_fasta: Path | None = None
     reference_id: str | None = None
     bam: Path | None = None
     bam_reads: BamReadsMode = "ref"
@@ -61,13 +62,14 @@ class InputSpec:
                 )
             if not self.mate1 and not self.unpaired:
                 raise ConfigError("FASTQ input needs mate1/mate2 pairs and/or unpaired reads")
-            if self.reference is not None and self.accession is not None:
-                raise ConfigError("specify reference or accession, not both")
-            if self.reference is None and self.accession is None:
-                raise ConfigError("FASTQ input needs a starting reference (reference or accession)")
+            if self.reference_fasta is None and self.reference_id is None:
+                raise ConfigError(
+                    "FASTQ input needs a starting reference (reference_fasta and/or reference_id)"
+                )
 
-        if have_bam and (self.reference is not None or self.accession is not None):
-            raise ConfigError("reference/accession only apply when starting from FASTQ")
+        # For have_bam, reference_fasta/reference_id are both optional: if
+        # neither resolves to a usable reference, iteration 0 just has no
+        # {reference} available (see runner.py).
 
         if self.bam_reads not in _VALID_BAM_READS_MODES:
             raise ConfigError(
@@ -82,8 +84,7 @@ class InputOverrides:
     mate1: tuple[Path, ...] | None = None
     mate2: tuple[Path, ...] | None = None
     unpaired: tuple[Path, ...] | None = None
-    reference: Path | None = None
-    accession: str | None = None
+    reference_fasta: Path | None = None
     reference_id: str | None = None
     bam: Path | None = None
     bam_reads: BamReadsMode | None = None
@@ -101,8 +102,9 @@ def apply_input_overrides(base: InputSpec | None, overrides: InputOverrides) -> 
         mate1=overrides.mate1 if overrides.mate1 is not None else base.mate1,
         mate2=overrides.mate2 if overrides.mate2 is not None else base.mate2,
         unpaired=overrides.unpaired if overrides.unpaired is not None else base.unpaired,
-        reference=overrides.reference if overrides.reference is not None else base.reference,
-        accession=overrides.accession if overrides.accession is not None else base.accession,
+        reference_fasta=(
+            overrides.reference_fasta if overrides.reference_fasta is not None else base.reference_fasta
+        ),
         reference_id=overrides.reference_id if overrides.reference_id is not None else base.reference_id,
         bam=overrides.bam if overrides.bam is not None else base.bam,
         bam_reads=overrides.bam_reads if overrides.bam_reads is not None else base.bam_reads,
@@ -192,14 +194,13 @@ def _parse_consensus(raw: dict) -> ConsensusSpec:
 
 
 def _parse_input(raw: dict) -> InputSpec:
-    reference = raw.get("reference")
+    reference_fasta = raw.get("reference_fasta")
     bam = raw.get("bam")
     return InputSpec(
         mate1=_paths(raw.get("mate1"), "[input] mate1"),
         mate2=_paths(raw.get("mate2"), "[input] mate2"),
         unpaired=_paths(raw.get("unpaired"), "[input] unpaired"),
-        reference=Path(reference) if reference is not None else None,
-        accession=raw.get("accession"),
+        reference_fasta=Path(reference_fasta) if reference_fasta is not None else None,
         reference_id=raw.get("reference_id"),
         bam=Path(bam) if bam is not None else None,
         bam_reads=raw.get("bam_reads", "ref"),

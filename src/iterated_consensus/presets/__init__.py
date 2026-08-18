@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from importlib import resources
 
+from ..errors import IteratedConsensusError
+
 _DESCRIPTIONS = {
     "bowtie2-ivar": "bowtie2 for mapping, ivar consensus for consensus calling",
     "bwa-samtools": "bwa mem for mapping, `samtools consensus` for consensus calling",
@@ -14,7 +16,7 @@ _FILENAMES = {
 }
 
 
-class PresetError(ValueError):
+class PresetError(IteratedConsensusError, ValueError):
     """Raised when an unknown preset name is requested."""
 
 

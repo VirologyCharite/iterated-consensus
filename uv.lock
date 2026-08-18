@@ -163,7 +163,7 @@ wheels = [
 
 [[package]]
 name = "iterated-consensus"
-version = "0.1.2"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "edlib" },

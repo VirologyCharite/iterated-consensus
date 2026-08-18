@@ -5,6 +5,7 @@ import pysam
 import pytest
 
 from iterated_consensus.config import Config, ConsensusSpec, InputSpec, Mapper
+from iterated_consensus.reference import ReferenceError
 from iterated_consensus.runner import RunnerError, preview, run
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -30,7 +31,7 @@ def test_fastq_start_converges_and_writes_outputs(tmp_path: Path) -> None:
             steps=([sys.executable, str(FIXTURES / "copy_fasta.py"), "{reference}", "{consensus_prefix}.fa"],),
             output="{consensus_prefix}.fa",
         ),
-        input=InputSpec(unpaired=(unpaired,), reference=reference),
+        input=InputSpec(unpaired=(unpaired,), reference_fasta=reference),
         threads=1,
         max_iterations=10,
         convergence_identity=100.0,
@@ -72,7 +73,7 @@ def test_on_iteration_callback_fires_once_per_executed_iteration(tmp_path: Path)
             steps=([sys.executable, str(FIXTURES / "copy_fasta.py"), "{reference}", "{consensus_prefix}.fa"],),
             output="{consensus_prefix}.fa",
         ),
-        input=InputSpec(unpaired=(unpaired,), reference=reference),
+        input=InputSpec(unpaired=(unpaired,), reference_fasta=reference),
     )
 
     seen: list[int] = []
@@ -145,7 +146,7 @@ def test_preview_fastq_start_renders_iterations_0_and_1(tmp_path: Path) -> None:
             steps=([sys.executable, str(FIXTURES / "copy_fasta.py"), "{reference}", "{consensus_prefix}.fa"],),
             output="{consensus_prefix}.fa",
         ),
-        input=InputSpec(unpaired=(unpaired,), reference=reference),
+        input=InputSpec(unpaired=(unpaired,), reference_fasta=reference),
     )
     result = preview(config, tmp_path / "out")
     assert len(result.lines) == 6  # iter 0: index, map, consensus; iter 1: same shape
@@ -195,8 +196,8 @@ def test_preview_bam_start_iteration_0_has_no_mapping_lines(tmp_path: Path) -> N
     assert "no mapping step" in result.note
 
 
-def _make_synthetic_bam(bam_path: Path) -> None:
-    header = {"HD": {"VN": "1.6"}, "SQ": [{"LN": 50, "SN": "chr1"}]}
+def _make_synthetic_bam(bam_path: Path, *, ref_name: str = "chr1", ref_length: int = 50) -> None:
+    header = {"HD": {"VN": "1.6"}, "SQ": [{"LN": ref_length, "SN": ref_name}]}
     with pysam.AlignmentFile(str(bam_path), "wb", header=header) as f:
         segment = pysam.AlignedSegment()
         segment.query_name = "r1"
@@ -208,6 +209,127 @@ def _make_synthetic_bam(bam_path: Path) -> None:
         segment.cigar = [(0, 4)]
         segment.query_qualities = pysam.qualitystring_to_array("IIII")
         f.write(segment)
+
+
+def _consensus_using_reference() -> ConsensusSpec:
+    return ConsensusSpec(
+        steps=([sys.executable, str(FIXTURES / "copy_fasta.py"), "{reference}", "{consensus_prefix}.fa"],),
+        output="{consensus_prefix}.fa",
+    )
+
+
+def _consensus_ignoring_reference() -> ConsensusSpec:
+    return ConsensusSpec(
+        steps=([sys.executable, str(FIXTURES / "write_fixed_fasta.py"), "{consensus_prefix}.fa"],),
+        output="{consensus_prefix}.fa",
+    )
+
+
+def test_preview_bam_start_uses_explicit_reference(tmp_path: Path) -> None:
+    bam_path = tmp_path / "input.bam"
+    _make_synthetic_bam(bam_path, ref_name="chr1", ref_length=20)
+    reference = tmp_path / "ref.fasta"
+    reference.write_text(">chr1\n" + "ACGT" * 5 + "\n")  # 20bp, matches the BAM header
+
+    config = Config(
+        mappers=(_fake_bam_mapper(),),
+        consensus=_consensus_using_reference(),
+        input=InputSpec(bam=bam_path, reference_fasta=reference),
+    )
+    result = preview(config, tmp_path / "out")
+    assert any("reference_initial.fasta" in line for line in result.lines)
+
+
+def test_preview_bam_start_explicit_reference_unknown_id_raises(tmp_path: Path) -> None:
+    bam_path = tmp_path / "input.bam"
+    _make_synthetic_bam(bam_path, ref_name="chr1", ref_length=20)
+    reference = tmp_path / "ref.fasta"
+    reference.write_text(">wrong_name\n" + "ACGT" * 5 + "\n")
+
+    config = Config(
+        mappers=(_fake_bam_mapper(),),
+        consensus=_consensus_using_reference(),
+        input=InputSpec(bam=bam_path, reference_fasta=reference),
+    )
+    with pytest.raises(ReferenceError, match="not found"):
+        preview(config, tmp_path / "out")
+
+
+def test_preview_bam_start_explicit_reference_length_mismatch_raises(tmp_path: Path) -> None:
+    bam_path = tmp_path / "input.bam"
+    _make_synthetic_bam(bam_path, ref_name="chr1", ref_length=20)
+    reference = tmp_path / "ref.fasta"
+    reference.write_text(">chr1\n" + "ACGT" * 3 + "\n")  # 12bp, BAM header says 20bp
+
+    config = Config(
+        mappers=(_fake_bam_mapper(),),
+        consensus=_consensus_using_reference(),
+        input=InputSpec(bam=bam_path, reference_fasta=reference),
+    )
+    with pytest.raises(RunnerError, match=r"12 bp.*20 bp"):
+        preview(config, tmp_path / "out")
+
+
+def test_preview_bam_start_auto_fetches_accession_looking_contig(tmp_path: Path) -> None:
+    bam_path = tmp_path / "input.bam"
+    _make_synthetic_bam(bam_path, ref_name="NC_045512.2", ref_length=20)
+    out_dir = tmp_path / "out"
+    # Exploit fetch_ncbi_accession's own cache check so no real network call happens.
+    cache_dir = out_dir / "reference_cache"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "NC_045512.2.fasta").write_text(">NC_045512.2\n" + "ACGT" * 5 + "\n")
+
+    config = Config(
+        mappers=(_fake_bam_mapper(),),
+        consensus=_consensus_using_reference(),
+        input=InputSpec(bam=bam_path),
+    )
+    result = preview(config, out_dir)
+    assert any("reference_initial.fasta" in line for line in result.lines)
+
+
+def test_preview_bam_start_auto_fetch_id_mismatch_raises(tmp_path: Path) -> None:
+    bam_path = tmp_path / "input.bam"
+    _make_synthetic_bam(bam_path, ref_name="NC_045512.2", ref_length=20)
+    out_dir = tmp_path / "out"
+    cache_dir = out_dir / "reference_cache"
+    cache_dir.mkdir(parents=True)
+    # A cached file that doesn't actually match what we asked for (id differs).
+    (cache_dir / "NC_045512.2.fasta").write_text(">NC_045512.1\n" + "ACGT" * 5 + "\n")
+
+    config = Config(
+        mappers=(_fake_bam_mapper(),),
+        consensus=_consensus_using_reference(),
+        input=InputSpec(bam=bam_path),
+    )
+    with pytest.raises(RunnerError, match="does not match BAM reference"):
+        preview(config, out_dir)
+
+
+def test_preview_bam_start_no_reference_ok_if_consensus_does_not_need_it(tmp_path: Path) -> None:
+    bam_path = tmp_path / "input.bam"
+    _make_synthetic_bam(bam_path, ref_name="chr1", ref_length=20)  # not accession-like
+
+    config = Config(
+        mappers=(_fake_bam_mapper(),),
+        consensus=_consensus_ignoring_reference(),
+        input=InputSpec(bam=bam_path),
+    )
+    result = preview(config, tmp_path / "out")
+    assert len(result.lines) == 4  # iter 0: consensus only; iter 1: index, map, consensus
+
+
+def test_preview_bam_start_no_reference_but_consensus_needs_it_raises(tmp_path: Path) -> None:
+    bam_path = tmp_path / "input.bam"
+    _make_synthetic_bam(bam_path, ref_name="chr1", ref_length=20)  # not accession-like
+
+    config = Config(
+        mappers=(_fake_bam_mapper(),),
+        consensus=_consensus_using_reference(),
+        input=InputSpec(bam=bam_path),
+    )
+    with pytest.raises(RunnerError, match="can never succeed"):
+        preview(config, tmp_path / "out")
 
 
 def test_resume_continues_past_a_raised_max_iterations(tmp_path: Path) -> None:

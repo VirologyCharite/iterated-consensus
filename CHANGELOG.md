@@ -1,3 +1,7 @@
+# 0.2.0 August 18, 2026
+
+Simplified `reference_id` and `reference_fasta` config variables.
+
 # 0.1.2 August 18, 2026
 
 Updated `pyproject.toml`.

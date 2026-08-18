@@ -13,8 +13,10 @@ from pathlib import Path
 
 import pysam
 
+from .errors import IteratedConsensusError
 
-class BamError(RuntimeError):
+
+class BamError(IteratedConsensusError, RuntimeError):
     """Raised for BAM-related failures: missing/ambiguous reference, bad input, etc."""
 
 
@@ -59,6 +61,12 @@ def count_mapped_reads(bam_path: Path, *, reference_name: str | None = None) -> 
             1 for read in iterator if not read.is_unmapped and not read.is_secondary
             and not read.is_supplementary
         )
+
+
+def get_reference_length(bam_path: Path, reference_name: str) -> int:
+    """The length (LN) the BAM header records for one of its references."""
+    with pysam.AlignmentFile(str(bam_path), "rb") as bam:
+        return bam.get_reference_length(reference_name)
 
 
 def _fastq_has_reads(path: Path) -> bool:

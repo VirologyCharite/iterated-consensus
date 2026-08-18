@@ -37,6 +37,10 @@ consensus length, identity to the previous consensus, time taken). Every run
 also writes `results/index.html` -- open it in a browser for a summary and
 full per-iteration detail, no `--progress` needed.
 
+Errors (bad config, a failing command, a mismatched reference, ...) normally
+print a short `error: ...` message. Add `--traceback` to instead let them
+crash with the full Python traceback, for debugging.
+
 ## Config format
 
 A config has one or more `[[mapper]]` tables, one `[consensus]` table, and
@@ -62,11 +66,12 @@ output = "{consensus_prefix}.fa"   # where the harness should find the result
 mate1 = ["a_R1.fastq.gz", "b_R1.fastq.gz"]   # 0 or more paired sets
 mate2 = ["a_R2.fastq.gz", "b_R2.fastq.gz"]
 unpaired = []                                 # 0 or more single-end files
-reference = "starting_reference.fasta"        # or: accession = "NC_045512.2"
-# reference_id = "chr2"        # only if `reference` has >1 sequence
+reference_fasta = "starting_reference.fasta"  # a local file...
+# reference_id = "chr2"        # ...and/or a name -- see "Reference resolution" below
 # --- or, instead of the FASTQ block above, start from a BAM: ---
 # bam = "input.bam"
-# reference_id = "chr2"        # only if the BAM has >1 reference (same key, a contig name here)
+# reference_id = "chr2"        # only needed if the BAM has >1 reference
+# reference_fasta = "chr2.fasta"  # optional -- see "Reference resolution" below
 # bam_reads = "ref"            # ref | ref+unal | all -- see below
 
 [run]
@@ -93,10 +98,11 @@ example above).
 ### Placeholders
 
 - `{reference}` -- the current reference FASTA: the previous iteration's
-  consensus, or the starting reference for iteration 0. Not set for iteration
-  0 of a BAM-start run unless you also give `reference` in `[input]` --
-  referencing `{reference}` there without one is a clear config error, not a
-  silent guess.
+  consensus, or the starting reference for iteration 0. For a BAM-start run,
+  iteration 0's reference is only available if it could be resolved -- see
+  "Reference resolution" below; if not, and `[consensus]` uses `{reference}`
+  anyway, that's a config error caught before anything runs, not a silent
+  guess.
 - `{index_prefix}` -- path prefix for this mapper's index this iteration.
 - `{bam}` -- path this mapper should write its BAM to.
 - `{consensus_prefix}` -- path prefix for the consensus step's output.
@@ -139,6 +145,48 @@ its scope:
 - `ref+unal` -- that, plus reads that didn't map anywhere (candidates for
   mapping once the consensus improves).
 - `all` -- every read in the BAM, regardless of what it mapped to.
+
+### Reference resolution
+
+Two `[input]` keys between them cover every way of specifying a starting
+reference, for both FASTQ-start and BAM-start:
+
+- `reference_id` -- just a *name*, never a file. It can be a record ID
+  within `reference_fasta`, a contig name within `bam`, and/or an NCBI
+  accession -- the same string can serve more than one of these roles at
+  once (see the examples below).
+- `reference_fasta` -- a pre-existing local FASTA file. If it has exactly
+  one sequence, that sequence is used automatically; if it has more than
+  one, `reference_id` must be given to pick which.
+
+Whether you need one, the other, both, or neither depends on the situation:
+
+- **Neither**: BAM-start, the BAM has only one reference, and its name is
+  itself an NCBI accession (e.g. `NC_045512.2`) -- it's fetched
+  automatically.
+- **`reference_id` only**: BAM-start, the BAM has several references, you
+  pick one with `reference_id`, and that name is itself an accession.
+- **`reference_fasta` only**: FASTQ-start (or BAM-start), and the file has
+  just one sequence.
+- **Both**: FASTQ-start (or BAM-start) with a multi-sequence
+  `reference_fasta` -- `reference_id` picks which record. For BAM-start
+  specifically, this is also how you'd give the actual reference the BAM
+  was aligned against, rather than relying on auto-fetch.
+- **Neither, and unresolvable**: iteration 0 just has no `{reference}`.
+  That's fine for a BAM-start run *unless* `[consensus]` actually uses
+  `{reference}` -- in which case it's reported as a config error before
+  anything runs, since that combination can never succeed (iteration 0
+  always runs first, before any consensus this tool computed exists to fall
+  back on). A FASTQ-start run always needs *some* reference to build
+  iteration 0's mapping index against, so this case is always an error
+  there.
+
+For a BAM-start run, whichever way a reference is obtained, it's validated
+against the BAM before use: the FASTA record's id must match the resolved
+contig name exactly, and its sequence length must match the BAM header's
+length for that contig exactly. A mismatch aborts the run immediately --
+proceeding would mean calling a pileup-based consensus against a reference
+the BAM's own coordinates don't actually match, silently producing garbage.
 
 ## Output
 

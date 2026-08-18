@@ -9,10 +9,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import CommandStep
+from .errors import IteratedConsensusError
 from .templating import CatResolver, render
 
 
-class CommandError(RuntimeError):
+class CommandError(IteratedConsensusError, RuntimeError):
     """Raised when a rendered command exits non-zero."""
 
 

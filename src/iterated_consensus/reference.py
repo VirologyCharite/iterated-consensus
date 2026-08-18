@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import re
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+from .errors import IteratedConsensusError
 
-class ReferenceError(RuntimeError):
+
+class ReferenceError(IteratedConsensusError, RuntimeError):
     """Raised for missing/ambiguous/malformed reference sequences."""
 
 
@@ -74,6 +77,22 @@ def write_fasta(path: Path, record_id: str, sequence: str, *, line_width: int = 
 
 _NCBI_EFETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 
+# RefSeq (NC_045512.2, NZ_CP012345.1) or GenBank (MN908947.3, U12345.1) style:
+# 1-2 letters, optional underscore + up to 2 more letters (RefSeq assembly
+# accessions like NZ_ embed a GenBank-style accession after the prefix),
+# 5-9 digits, optional dot-version.
+_ACCESSION_RE = re.compile(r"^[A-Za-z]{1,2}_?[A-Za-z]{0,2}[0-9]{5,9}(\.[0-9]+)?$")
+
+
+def looks_like_ncbi_accession(name: str) -> bool:
+    """Heuristic: could `name` plausibly be a RefSeq/GenBank nucleotide accession?
+
+    Deliberately permissive -- a false positive just means an attempted
+    fetch that fails cleanly with a normal ReferenceError; a false negative
+    silently loses a reference the caller could have auto-fetched.
+    """
+    return bool(_ACCESSION_RE.match(name))
+
 
 def fetch_ncbi_accession(accession: str, out_dir: Path) -> Path:
     """Download a nucleotide FASTA record from NCBI, caching it in `out_dir`."""
@@ -98,3 +117,24 @@ def fetch_ncbi_accession(accession: str, out_dir: Path) -> Path:
         )
     target.write_text(text)
     return target
+
+
+def resolve_reference(
+    *, reference_id: str | None, reference_fasta: Path | None, cache_dir: Path
+) -> FastaRecord | None:
+    """Resolve "the reference sequence" from `reference_fasta` and/or `reference_id`.
+
+    `reference_id` is just a name -- it can match a record in
+    `reference_fasta` (if given), or, if `reference_fasta` isn't given and
+    the name looks like an NCBI accession, be fetched.
+
+    Returns None if nothing could be resolved from what's given here --
+    callers decide whether that's acceptable (a BAM-start run can tolerate
+    having no reference for iteration 0; a FASTQ-start run can't).
+    """
+    if reference_fasta is not None:
+        return load_reference(reference_fasta, reference_id)
+    if reference_id is not None and looks_like_ncbi_accession(reference_id):
+        fasta_path = fetch_ncbi_accession(reference_id, cache_dir)
+        return load_reference(fasta_path)
+    return None

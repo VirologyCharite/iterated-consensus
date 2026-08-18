@@ -8,12 +8,13 @@ from pathlib import Path
 
 from .commands import CommandError, RenderedCommand, render_command, run_command
 from .config import ConsensusSpec
+from .errors import IteratedConsensusError
 from .metrics import base_composition
 from .reference import parse_fasta
 from .templating import CatResolver, render
 
 
-class ConsensusError(RuntimeError):
+class ConsensusError(IteratedConsensusError, RuntimeError):
     """Raised when the consensus pipeline fails or produces an unusable result."""
 
 

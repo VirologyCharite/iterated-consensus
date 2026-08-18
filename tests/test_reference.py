@@ -5,6 +5,7 @@ import pytest
 from iterated_consensus.reference import (
     ReferenceError,
     load_reference,
+    looks_like_ncbi_accession,
     parse_fasta,
     write_fasta,
 )
@@ -87,3 +88,33 @@ def test_write_then_load_round_trip(tmp_path: Path) -> None:
     record = load_reference(out)
     assert record.id == "seq1"
     assert record.sequence == "ACGTACGTACGT"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "NC_045512.2",  # RefSeq, versioned
+        "NC_045512",  # RefSeq, unversioned
+        "NZ_CP012345.1",
+        "MN908947.3",  # GenBank
+        "U12345.1",
+        "mn908947.3",  # lowercase should still count
+    ],
+)
+def test_looks_like_ncbi_accession_true(name: str) -> None:
+    assert looks_like_ncbi_accession(name)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "chr1",
+        "chr2",
+        "MT",
+        "1",
+        "scaffold_12",
+        "",
+    ],
+)
+def test_looks_like_ncbi_accession_false(name: str) -> None:
+    assert not looks_like_ncbi_accession(name)
