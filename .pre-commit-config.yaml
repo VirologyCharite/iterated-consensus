@@ -1,9 +1,26 @@
+fail_fast: true
+
 repos:
   - repo: local
     hooks:
+      - id: check-uv-lock
+        name: check uv.lock is up to date
+        # Regenerates uv.lock if pyproject.toml changed (e.g. a version
+        # bump) and stages it, so it's included once the commit is re-run.
+        # Runs first, with fail_fast above, so a stale lock is reported
+        # here clearly -- not confusingly, inside the pytest hook below.
+        entry: scripts/check_uv_lock.sh
+        language: system
+        pass_filenames: false
+        always_run: true
       - id: pytest
         name: pytest
-        entry: uv run pytest
+        # --no-sync: never let `uv run` touch the venv or uv.lock as a side
+        # effect of this hook -- pre-commit treats any file it modifies as
+        # a failure, even if pytest itself passed. The check-uv-lock hook
+        # above already guarantees uv.lock is current by the time this
+        # runs, so there's nothing for a sync to do anyway.
+        entry: uv run --no-sync pytest
         language: system
         pass_filenames: false
         always_run: true

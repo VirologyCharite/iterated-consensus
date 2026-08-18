@@ -1,3 +1,8 @@
+# 0.2.1 August 18, 2026
+
+Added automatic sorting and indexing of BAM files if the mapper
+commands happen not to do it.
+
 # 0.2.0 August 18, 2026
 
 Simplified `reference_id` and `reference_fasta` config variables.

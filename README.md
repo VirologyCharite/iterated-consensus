@@ -298,3 +298,10 @@ should be started fresh in a new `--out-dir`.
 uv sync
 uv run pytest
 ```
+
+Optionally, `uv run pre-commit install` sets up a pre-commit hook that runs
+the test suite (and keeps `uv.lock` in sync with `pyproject.toml`
+automatically, regenerating and staging it if a commit -- e.g. a version
+bump -- leaves it stale) before each commit. This is per-clone setup: it
+writes into `.git/hooks/`, which isn't itself tracked by git, so it doesn't
+happen automatically just from cloning the repo.
