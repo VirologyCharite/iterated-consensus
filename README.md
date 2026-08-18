@@ -95,6 +95,26 @@ whenever you're just running one program) or as a single string (run via a
 shell -- needed for pipes, as in the `samtools mpileup | ivar consensus`
 example above).
 
+After each mapper's `map_cmd` runs (and after merging, if more than one
+mapper is configured), iterated-consensus checks for a `.bam.bai` index next
+to the resulting BAM and creates one with `samtools index` if it's missing
+-- most consensus tools need one, so you don't have to remember to add an
+indexing step to `map_cmd` yourself. Indexing needs the BAM coordinate-sorted
+first, so the BAM header's own `SO` tag is checked before doing anything
+else: if it's already marked `SO:coordinate`, indexing runs directly (fast,
+and avoids a pointless sort pass over a large, already-sorted BAM); if not
+(`map_cmd` forgot a `samtools sort`, or a mapper wrote it unsorted), it's
+sorted in place automatically first, so `map_cmd` doesn't strictly need its
+own sort step either. (A BAM whose header lies about being sorted -- rare,
+but not impossible -- is still caught: if indexing the "already-sorted" file
+fails anyway, it's sorted for real and indexing is retried.) This only
+covers the BAM a mapping step actually produces; it doesn't apply to
+`iter_000` of a BAM-start run, which has no mapping step (see "Reference
+resolution"
+above) -- add your own `samtools index {bam}` step to `[consensus]` if that
+BAM needs indexing too (the bundled `bwa-samtools` preset does exactly
+this).
+
 ### Placeholders
 
 - `{reference}` -- the current reference FASTA: the previous iteration's
@@ -145,6 +165,15 @@ its scope:
 - `ref+unal` -- that, plus reads that didn't map anywhere (candidates for
   mapping once the consensus improves).
 - `all` -- every read in the BAM, regardless of what it mapped to.
+
+Your input BAM itself is never rewritten, regardless of any of this. Some of
+the above needs it indexed, which needs it coordinate-sorted; if it's
+already sorted, an index is created directly beside it if missing (that's
+harmless -- purely additive, same as any tool would do), but if it actually
+needs sorting, that happens to a separate copy under `--out-dir`, not to
+your file. (This is specifically about the BAM you pass in via `bam =`;
+BAMs iterated-consensus generates itself, like each iteration's mapping
+output, are sorted in place freely -- those are its own working files.)
 
 ### Reference resolution
 

@@ -7,6 +7,8 @@ import pytest
 from iterated_consensus.bam import (
     BamError,
     count_mapped_reads,
+    ensure_indexed,
+    ensure_indexed_readonly,
     extract_fastq,
     resolve_reference_name,
 )
@@ -132,3 +134,139 @@ def test_extract_fastq_is_idempotent(two_ref_bam: Path, tmp_path: Path) -> None:
 
     second = extract_fastq(two_ref_bam, reference_name="chr1", mode="ref", out_dir=out_dir)
     assert second == first
+
+
+def test_ensure_indexed_creates_bai_when_missing(two_ref_bam: Path) -> None:
+    bai_path = Path(str(two_ref_bam) + ".bai")
+    assert not bai_path.exists()
+    ensure_indexed(two_ref_bam)
+    assert bai_path.exists()
+
+
+def test_ensure_indexed_skips_sorting_when_header_says_sorted(two_ref_bam: Path) -> None:
+    # two_ref_bam's header already declares SO=coordinate (and really is
+    # sorted) -- indexing should use that directly rather than sorting
+    # first, which would rewrite the file even though it doesn't need to.
+    bytes_before = two_ref_bam.read_bytes()
+    ensure_indexed(two_ref_bam)
+    assert two_ref_bam.read_bytes() == bytes_before
+
+
+def test_ensure_indexed_falls_back_to_sorting_if_header_lied(tmp_path: Path) -> None:
+    bam_path = tmp_path / "mislabeled.bam"
+    # Header claims coordinate-sorted, but the reads aren't actually.
+    header = {"HD": {"VN": "1.6", "SO": "coordinate"}, "SQ": [{"LN": 20, "SN": "chr1"}]}
+    with pysam.AlignmentFile(str(bam_path), "wb", header=header) as f:
+        f.write(_segment("r10", "ACGT", flag=0, reference_id=0, reference_start=10))
+        f.write(_segment("r0", "ACGT", flag=0, reference_id=0, reference_start=0))
+
+    ensure_indexed(bam_path)
+
+    assert Path(str(bam_path) + ".bai").exists()
+    with pysam.AlignmentFile(str(bam_path)) as f:
+        positions = [r.reference_start for r in f]
+    assert positions == [0, 10]  # actually sorted despite the misleading header
+
+
+def test_ensure_indexed_is_a_noop_if_already_indexed(two_ref_bam: Path) -> None:
+    bai_path = Path(str(two_ref_bam) + ".bai")
+    ensure_indexed(two_ref_bam)
+    mtime_before = bai_path.stat().st_mtime
+
+    two_ref_bam.unlink()  # prove the second call doesn't need the source bam at all
+    ensure_indexed(two_ref_bam)
+
+    assert bai_path.stat().st_mtime == mtime_before
+
+
+def test_ensure_indexed_sorts_unsorted_bam_then_indexes(tmp_path: Path) -> None:
+    bam_path = tmp_path / "unsorted.bam"
+    header = {"HD": {"VN": "1.6"}, "SQ": [{"LN": 20, "SN": "chr1"}]}
+    with pysam.AlignmentFile(str(bam_path), "wb", header=header) as f:
+        # coordinate order 10, then 0 -- not sorted
+        f.write(_segment("r10", "ACGT", flag=0, reference_id=0, reference_start=10))
+        f.write(_segment("r0", "ACGT", flag=0, reference_id=0, reference_start=0))
+
+    ensure_indexed(bam_path)
+
+    assert Path(str(bam_path) + ".bai").exists()
+    with pysam.AlignmentFile(str(bam_path)) as f:
+        positions = [r.reference_start for r in f]
+    assert positions == [0, 10]  # now actually sorted
+
+
+def test_ensure_indexed_unreadable_bam_raises_bam_error(tmp_path: Path) -> None:
+    bam_path = tmp_path / "garbage.bam"
+    bam_path.write_bytes(b"this is not a bam file")
+
+    with pytest.raises(BamError, match="could not sort"):
+        ensure_indexed(bam_path)
+
+
+def test_ensure_indexed_readonly_already_indexed_returns_original_untouched(
+    two_ref_bam: Path, tmp_path: Path
+) -> None:
+    ensure_indexed(two_ref_bam)  # pre-index it, as if from an earlier run
+    bytes_before = two_ref_bam.read_bytes()
+
+    work_dir = tmp_path / "work"
+    result = ensure_indexed_readonly(two_ref_bam, work_dir)
+
+    assert result == two_ref_bam
+    assert two_ref_bam.read_bytes() == bytes_before
+    assert not work_dir.exists()  # never even created -- nothing needed it
+
+
+def test_ensure_indexed_readonly_sorted_indexes_beside_original(
+    two_ref_bam: Path, tmp_path: Path
+) -> None:
+    # two_ref_bam's header already declares SO=coordinate and really is sorted.
+    bytes_before = two_ref_bam.read_bytes()
+    work_dir = tmp_path / "work"
+
+    result = ensure_indexed_readonly(two_ref_bam, work_dir)
+
+    assert result == two_ref_bam
+    assert two_ref_bam.read_bytes() == bytes_before  # content untouched
+    assert Path(str(two_ref_bam) + ".bai").exists()  # index added beside it
+    assert not work_dir.exists()  # no copy was needed
+
+
+def test_ensure_indexed_readonly_unsorted_never_modifies_original(tmp_path: Path) -> None:
+    bam_path = tmp_path / "unsorted.bam"
+    header = {"HD": {"VN": "1.6"}, "SQ": [{"LN": 20, "SN": "chr1"}]}
+    with pysam.AlignmentFile(str(bam_path), "wb", header=header) as f:
+        f.write(_segment("r10", "ACGT", flag=0, reference_id=0, reference_start=10))
+        f.write(_segment("r0", "ACGT", flag=0, reference_id=0, reference_start=0))
+    bytes_before = bam_path.read_bytes()
+    work_dir = tmp_path / "work"
+
+    result = ensure_indexed_readonly(bam_path, work_dir)
+
+    # The original is completely untouched: same bytes, no sidecar index.
+    assert bam_path.read_bytes() == bytes_before
+    assert not Path(str(bam_path) + ".bai").exists()
+
+    # A separate, sorted, indexed copy was made instead.
+    assert result != bam_path
+    assert result.parent == work_dir
+    assert Path(str(result) + ".bai").exists()
+    with pysam.AlignmentFile(str(result)) as f:
+        positions = [r.reference_start for r in f]
+    assert positions == [0, 10]
+
+
+def test_ensure_indexed_readonly_is_idempotent(tmp_path: Path) -> None:
+    bam_path = tmp_path / "unsorted.bam"
+    header = {"HD": {"VN": "1.6"}, "SQ": [{"LN": 20, "SN": "chr1"}]}
+    with pysam.AlignmentFile(str(bam_path), "wb", header=header) as f:
+        f.write(_segment("r10", "ACGT", flag=0, reference_id=0, reference_start=10))
+        f.write(_segment("r0", "ACGT", flag=0, reference_id=0, reference_start=0))
+    work_dir = tmp_path / "work"
+
+    first = ensure_indexed_readonly(bam_path, work_dir)
+    mtime_before = first.stat().st_mtime
+    second = ensure_indexed_readonly(bam_path, work_dir)
+
+    assert second == first
+    assert second.stat().st_mtime == mtime_before  # not re-sorted

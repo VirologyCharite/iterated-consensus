@@ -43,18 +43,105 @@ def resolve_reference_name(bam_path: Path, reference_id: str | None) -> str:
     raise BamError(f"{bam_path} has multiple references {refs}; specify reference_id to pick one")
 
 
-def _ensure_indexed(bam_path: Path) -> None:
-    if bam_path.with_suffix(bam_path.suffix + ".bai").exists():
-        return
+def _is_coordinate_sorted(bam_path: Path) -> bool:
+    """Check the header's own SO tag -- just reads the header, not the reads.
+
+    A file that can't even be opened as a BAM (corrupt, not actually a BAM,
+    ...) isn't verifiably sorted either -- treated as False here, so the
+    caller falls through to an actual sort/index attempt, which will raise
+    a proper BamError explaining the real problem.
+    """
+    try:
+        with pysam.AlignmentFile(str(bam_path), "rb") as bam:
+            return bam.header.get("HD", {}).get("SO") == "coordinate"
+    except (ValueError, OSError):
+        return False
+
+
+def _sort_to(source: Path, dest: Path) -> None:
+    try:
+        pysam.sort("-o", str(dest), str(source))
+    except pysam.SamtoolsError as exc:
+        raise BamError(f"could not sort {source} for indexing: {exc}") from exc
+
+
+def _sort_in_place(bam_path: Path) -> None:
+    sorting_path = bam_path.with_name(bam_path.name + ".sorting.tmp")
+    _sort_to(bam_path, sorting_path)
+    sorting_path.replace(bam_path)
+
+
+def _index(bam_path: Path) -> None:
+    try:
+        pysam.index(str(bam_path))
+    except pysam.SamtoolsError as exc:
+        raise BamError(f"could not index {bam_path}: {exc}") from exc
+
+
+def ensure_indexed(bam_path: Path) -> None:
+    """Create a `.bam.bai` index for `bam_path`, unless one (or a `.csi`) already exists.
+
+    Sorts `bam_path` in place first if it isn't already coordinate-sorted --
+    indexing requires that, and a mapper's own output isn't always sorted.
+    The header's own sort-order tag decides whether to sort, rather than
+    just trying to index and reacting to failure: for a large, genuinely
+    already-sorted BAM that only costs a header read, not a failed index
+    attempt (which would also print samtools' own error log to stderr even
+    though nothing is actually wrong).
+    """
     if Path(str(bam_path) + ".bai").exists() or Path(str(bam_path) + ".csi").exists():
         return
-    pysam.index(str(bam_path))
+
+    if not _is_coordinate_sorted(bam_path):
+        _sort_in_place(bam_path)
+        _index(bam_path)
+        return
+
+    try:
+        _index(bam_path)
+    except BamError:
+        # Header claimed coordinate-sorted but indexing failed anyway --
+        # sort for real and retry.
+        _sort_in_place(bam_path)
+        _index(bam_path)
+
+
+def ensure_indexed_readonly(bam_path: Path, work_dir: Path) -> Path:
+    """Like `ensure_indexed`, but for a BAM this process doesn't own (e.g. a
+    user's own BAM-start input) -- never rewrites `bam_path` itself.
+
+    An index is still created directly beside `bam_path` if it's already
+    coordinate-sorted and missing one: that's purely additive (doesn't touch
+    the BAM's own bytes) and is the conventional place tools look for it
+    anyway. But making an unsorted BAM indexable at all means reordering its
+    contents, which would mean rewriting `bam_path` -- so in that case (or
+    if indexing beside it fails for any other reason, e.g. a read-only
+    source directory), a sorted copy is written under `work_dir` instead,
+    indexed there, and returned. Either way, `bam_path` itself is never
+    modified.
+    """
+    if Path(str(bam_path) + ".bai").exists() or Path(str(bam_path) + ".csi").exists():
+        return bam_path
+
+    if _is_coordinate_sorted(bam_path):
+        try:
+            _index(bam_path)
+            return bam_path
+        except BamError:
+            pass  # couldn't index beside it -- fall through to a copy below
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+    sorted_path = work_dir / f"{bam_path.stem}.sorted.bam"
+    if not sorted_path.exists():
+        _sort_to(bam_path, sorted_path)
+    ensure_indexed(sorted_path)  # this copy is ours -- in-place is fine
+    return sorted_path
 
 
 def count_mapped_reads(bam_path: Path, *, reference_name: str | None = None) -> int:
     """Count primary mapped reads, optionally restricted to one reference."""
     if reference_name is not None:
-        _ensure_indexed(bam_path)
+        ensure_indexed(bam_path)
     with pysam.AlignmentFile(str(bam_path), "rb") as bam:
         iterator = bam.fetch(until_eof=True) if reference_name is None else bam.fetch(reference_name)
         return sum(
@@ -123,11 +210,11 @@ def extract_fastq(
     if mode == "all":
         source_bam = bam_path
     elif mode == "ref":
-        _ensure_indexed(bam_path)
+        ensure_indexed(bam_path)
         source_bam = out_dir / "extraction_source.bam"
         pysam.view("-b", "-o", str(source_bam), str(bam_path), reference_name, catch_stdout=False)
     elif mode == "ref+unal":
-        _ensure_indexed(bam_path)
+        ensure_indexed(bam_path)
         mapped_bam = out_dir / "extraction_mapped.bam"
         unmapped_bam = out_dir / "extraction_unmapped.bam"
         pysam.view("-b", "-o", str(mapped_bam), str(bam_path), reference_name, catch_stdout=False)

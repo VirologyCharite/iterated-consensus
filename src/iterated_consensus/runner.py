@@ -45,6 +45,8 @@ import pysam
 
 from .bam import (
     count_mapped_reads,
+    ensure_indexed,
+    ensure_indexed_readonly,
     extract_fastq,
     get_reference_length,
     resolve_reference_name,
@@ -171,8 +173,13 @@ def _prepare_initial_state(config: Config, out_dir: Path) -> _InitialState:
                 "[input].reference_fasta, or set [input].reference_id to an NCBI accession."
             )
 
+        # Never rewrite the user's own input BAM: region queries below need
+        # it indexed (and, if it isn't already sorted, sorted) -- do that
+        # against a copy under reads_dir instead, if needed.
+        safe_bam = ensure_indexed_readonly(input_spec.bam, reads_dir)
+
         extracted = extract_fastq(
-            input_spec.bam,
+            safe_bam,
             reference_name=reference_name,
             mode=input_spec.bam_reads,
             out_dir=reads_dir,
@@ -180,7 +187,7 @@ def _prepare_initial_state(config: Config, out_dir: Path) -> _InitialState:
         starting_bam = reads_dir / "iteration_0_source.bam"
         if not starting_bam.exists():
             pysam.view(
-                "-b", "-o", str(starting_bam), str(input_spec.bam), reference_name, catch_stdout=False
+                "-b", "-o", str(starting_bam), str(safe_bam), reference_name, catch_stdout=False
             )
         return _InitialState(
             reads_values=_reads_values_from_extraction(extracted),
@@ -265,6 +272,10 @@ def _run_mapping(
 
     if len(steps) > 1:
         pysam.merge("-f", str(bam_path), *(str(s.bam_path) for s in steps))
+
+    # Mapper commands don't always leave a .bam.bai behind; several
+    # consensus tools (e.g. `samtools consensus`) require one.
+    ensure_indexed(bam_path)
     return bam_path
 
 

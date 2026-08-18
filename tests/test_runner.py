@@ -52,6 +52,8 @@ def test_fastq_start_converges_and_writes_outputs(tmp_path: Path) -> None:
     assert (out_dir / "iter_001" / "consensus.fasta").exists()
     assert (out_dir / "iter_000" / "logs" / "fake_index.log").exists()
     assert (out_dir / "iter_000" / "logs" / "fake_map.log").exists()
+    # The fake mapper doesn't index its own output; the runner does it for us.
+    assert (out_dir / "iter_000" / "fake.bam.bai").exists()
     assert (out_dir / "metrics.tsv").exists()
     assert (out_dir / "summary.json").exists()
     assert (out_dir / "index.html").exists()
@@ -122,6 +124,69 @@ def test_bam_start_iteration_0_has_no_mapping_step(tmp_path: Path) -> None:
     # Iteration 1 does map, against iteration 0's consensus.
     assert (out_dir / "iter_001" / "logs" / "fake_index.log").exists()
     assert (out_dir / "iter_001" / "logs" / "fake_map.log").exists()
+
+
+def test_bam_start_never_modifies_the_original_unsorted_input_bam(tmp_path: Path) -> None:
+    bam_path = tmp_path / "input.bam"
+    header = {"HD": {"VN": "1.6"}, "SQ": [{"LN": 50, "SN": "chr1"}]}
+    with pysam.AlignmentFile(str(bam_path), "wb", header=header) as f:
+        # coordinate order 10, then 0 -- not sorted, and no SO tag either.
+        for name, pos in (("r10", 10), ("r0", 0)):
+            segment = pysam.AlignedSegment()
+            segment.query_name = name
+            segment.query_sequence = "ACGTACGTAC"
+            segment.flag = 0
+            segment.reference_id = 0
+            segment.reference_start = pos
+            segment.mapping_quality = 60
+            segment.cigar = [(0, 10)]
+            segment.query_qualities = pysam.qualitystring_to_array("I" * 10)
+            f.write(segment)
+    bytes_before = bam_path.read_bytes()
+
+    config = Config(
+        mappers=(_fake_bam_mapper(),),
+        consensus=ConsensusSpec(
+            steps=([sys.executable, str(FIXTURES / "write_fixed_fasta.py"), "{consensus_prefix}.fa"],),
+            output="{consensus_prefix}.fa",
+        ),
+        input=InputSpec(bam=bam_path),
+        max_iterations=1,
+    )
+    run(config, tmp_path / "out")
+
+    assert bam_path.read_bytes() == bytes_before
+    assert not Path(str(bam_path) + ".bai").exists()
+
+
+def test_run_sorts_and_indexes_unsorted_mapper_output(tmp_path: Path) -> None:
+    reference = tmp_path / "ref.fasta"
+    reference.write_text(">ref1\nACGT\n")
+    unpaired = tmp_path / "s.fastq"
+    unpaired.write_text("@r1\nACGT\n+\nIIII\n")
+
+    unsorted_mapper = Mapper(
+        name="unsorted",
+        index_cmd=["true"],
+        map_cmd=[sys.executable, str(FIXTURES / "make_unsorted_bam.py"), "{bam}"],
+    )
+    config = Config(
+        mappers=(unsorted_mapper,),
+        consensus=ConsensusSpec(
+            steps=([sys.executable, str(FIXTURES / "write_fixed_fasta.py"), "{consensus_prefix}.fa"],),
+            output="{consensus_prefix}.fa",
+        ),
+        input=InputSpec(unpaired=(unpaired,), reference_fasta=reference),
+        max_iterations=1,
+    )
+    out_dir = tmp_path / "out"
+    run(config, out_dir)
+
+    bam_path = out_dir / "iter_000" / "unsorted.bam"
+    assert (out_dir / "iter_000" / "unsorted.bam.bai").exists()
+    with pysam.AlignmentFile(str(bam_path)) as f:
+        positions = [r.reference_start for r in f]
+    assert positions == sorted(positions)
 
 
 def test_run_without_input_raises(tmp_path: Path) -> None:
