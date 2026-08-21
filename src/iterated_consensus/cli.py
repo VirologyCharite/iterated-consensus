@@ -11,7 +11,7 @@ import typer
 from .config import InputOverrides, apply_input_overrides, load_config, parse_file_list
 from .errors import IteratedConsensusError
 from .presets import PresetError, get_preset_text, list_presets
-from .report import format_elapsed, format_identity
+from .report import format_ambiguous_count, format_elapsed, format_identity
 from .runner import IterationRecord, preview, run
 
 app = typer.Typer(
@@ -28,6 +28,7 @@ _PROGRESS_COLUMNS = (
     ("iter", 4, ">"),
     ("reads_mapped", 13, ">"),
     ("consensus_length", 18, ">"),
+    ("ambiguous", 9, ">"),
     ("identity_to_previous", 22, ">"),
     ("elapsed", 8, ">"),
     ("consensus_md5", 32, ">"),
@@ -43,6 +44,7 @@ def _print_iteration_progress(record: IterationRecord) -> None:
         str(record.iteration),
         str(record.reads_mapped),
         str(record.consensus_length),
+        format_ambiguous_count(record.ambiguous_count),
         format_identity(record.identity_to_previous),
         format_elapsed(record.elapsed_seconds),
         record.consensus_md5 or "",
@@ -181,6 +183,10 @@ def run_cmd(
             typer.echo(f"Report: {outcome.output_dir / 'index.html'}")
             if outcome.final_consensus_path is not None:
                 typer.echo(f"Final consensus: {outcome.final_consensus_path}")
+            if outcome.final_reference_fasta_path is not None:
+                typer.echo(f"Final reference: {outcome.final_reference_fasta_path}")
+            if outcome.final_reference_bam_path is not None:
+                typer.echo(f"Final reference BAM: {outcome.final_reference_bam_path}")
     except IteratedConsensusError as exc:
         if traceback:
             raise

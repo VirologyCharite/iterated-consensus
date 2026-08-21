@@ -69,9 +69,17 @@ output = "{consensus_prefix}.fa"
 #   relative to the cwd, NOT --output-dir, unless you reference it yourself
 # consensus_id = "my-sample-name"              # optional -- the FASTA header
 #   to give it; if omitted, keeps whatever id the consensus tool itself used
+# final_reference_fasta = "{output_dir}/final_reference.fasta"  # optional --
+#   a relative symlink to the reference used for the final alignment step
+#   (the second-last iteration's consensus.fasta), independent of the above
+# final_reference_bam = "{output_dir}/final_reference.bam"      # optional --
+#   a relative symlink to the BAM mapped against it and used to call the
+#   final consensus (plus a matching .bam.bai symlink), independent too
 # commands = ["samtools faidx {consensus_fasta}"]   # optional -- run once
-#   consensus_fasta is written; also sees {consensus_id} and every other
-#   placeholder available to mapper/consensus commands (e.g. {threads})
+#   consensus_fasta/final_reference_fasta/final_reference_bam are written;
+#   also sees {consensus_id}/{final_reference_fasta}/{final_reference_bam}
+#   and every other placeholder available to mapper/consensus commands
+#   (e.g. {threads})
 
 [run]
 # output_dir = "results/"      # fallback for --output-dir; the CLI flag

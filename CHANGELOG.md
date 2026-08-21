@@ -1,9 +1,10 @@
-# 0.2.5 August 19, 2026
+# 0.2.5 August 21, 2026
 
-Allow output_dir in the config. Add `[tool-versions]` so the summary
+Allow `output_dir` in the config. Add `[tool-versions]` so the summary
 output can indicate version info. Make all config `[run]` variables
 available as placeholders in other parts of the config. Added
-iteration cycle detection. Improved `index.html` summary.
+iteration cycle detection. Improved `index.html` summary. Added
+`final_reference_fasta` and `final_reference_bam` to the config.
 
 # 0.2.4 August 18, 2026
 

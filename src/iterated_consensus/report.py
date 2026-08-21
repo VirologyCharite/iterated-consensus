@@ -6,6 +6,8 @@ import html
 import json
 from pathlib import Path
 
+from .metrics import ambiguous_count as _composition_ambiguous_count
+
 
 def format_elapsed(seconds: float) -> str:
     if seconds < 60:
@@ -139,15 +141,15 @@ def _chart_svg(iterations: list[dict]) -> str:
     )
 
 
-def _ambiguous_count(composition: dict[str, int]) -> str:
+def format_ambiguous_count(count: int | None) -> str:
+    return "—" if count is None else f"{count:,}"
+
+
+def _ambiguous_count(composition: dict[str, int]) -> int | None:
     """Count of consensus characters that aren't plain A/C/G/T -- IUPAC
-    ambiguity codes, N, gaps, anything else. "—" if there's no composition
+    ambiguity codes, N, gaps, anything else. None if there's no composition
     data at all (a resumed run's summary.json may predate this field)."""
-    if not composition:
-        return "—"
-    total = sum(composition.values())
-    unambiguous = sum(composition.get(b, 0) for b in _UNAMBIGUOUS_BASES)
-    return f"{total - unambiguous:,}"
+    return _composition_ambiguous_count(composition) if composition else None
 
 
 def _table_rows(iterations: list[dict]) -> str:
@@ -155,7 +157,7 @@ def _table_rows(iterations: list[dict]) -> str:
     for it in iterations:
         # .get, not [] -- a resumed run's summary.json may predate this field.
         md5 = it.get("consensus_md5") or "—"
-        ambiguous = _ambiguous_count(it.get("composition", {}))
+        ambiguous = format_ambiguous_count(_ambiguous_count(it.get("composition", {})))
         rows.append(
             "<tr>"
             f"<td>{it['iteration']}</td>"

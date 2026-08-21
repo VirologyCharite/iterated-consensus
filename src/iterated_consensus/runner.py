@@ -21,7 +21,9 @@ Directory layout written under `out_dir`:
         <mapper>_index.*       index files (absent for iter_000 of a BAM-start run)
         <mapper>.bam           that mapper's mapping output (same caveat)
         merged.bam             (only if >1 mapper) all mapper BAMs merged
-        consensus.fasta        this iteration's consensus
+        consensus.fasta        this iteration's consensus, id suffixed "-iteration-N"
+                                so every iteration's reference is uniquely named (see
+                                [output].final_reference_fasta/final_reference_bam)
         stats.json             this iteration's metrics
         logs/                  captured stdout+stderr of every command run
     metrics.tsv                one row per iteration
@@ -67,6 +69,7 @@ from .consensus import ConsensusResult, run_consensus
 from .errors import IteratedConsensusError
 from .metrics import (
     ConvergenceState,
+    ambiguous_count,
     base_composition,
     check_convergence,
     sequence_identity,
@@ -104,6 +107,11 @@ class IterationRecord:
     (or the same run repeated) are easy to confirm at a glance. Defaults to
     None only so summary.json written before this field existed can still be
     resumed; every freshly-computed record always sets it."""
+    ambiguous_count: int | None = None
+    """Count of consensus characters that aren't plain A/C/G/T -- IUPAC
+    ambiguity codes, N, gaps, anything else (see metrics.ambiguous_count).
+    Defaults to None only so summary.json written before this field existed
+    can still be resumed; every freshly-computed record always sets it."""
 
 
 @dataclass(frozen=True)
@@ -131,6 +139,12 @@ class RunResult:
     final_consensus_path: Path | None = None
     """Where [output].consensus_fasta was actually written, if it's set --
     resolved relative to output_dir, same as _write_final_output."""
+    final_reference_fasta_path: Path | None = None
+    """Where [output].final_reference_fasta was written as a symlink, if
+    it's set -- see _write_final_output."""
+    final_reference_bam_path: Path | None = None
+    """Where [output].final_reference_bam was written as a symlink, if it's
+    set -- see _write_final_output."""
     cycle: CycleInfo | None = None
     """Set if the run stopped because a cycle was detected, rather than
     converging or hitting max_iterations. When set, the *first* occurrence
@@ -434,6 +448,7 @@ def _write_iteration_stats(
     identity: float | None,
     elapsed: float,
     consensus_md5: str,
+    composition: dict[str, int],
     tool_versions: dict[str, str],
     commands: list[CommandRun],
 ) -> None:
@@ -443,7 +458,7 @@ def _write_iteration_stats(
         "identity_to_previous": identity,
         "elapsed_seconds": elapsed,
         "consensus_md5": consensus_md5,
-        "composition": base_composition(consensus_result.sequence),
+        "composition": composition,
         "tool_versions": tool_versions,
         "commands": [asdict(c) for c in commands],
     }
@@ -510,48 +525,113 @@ def _write_summary_json(
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
 
 
+def _final_reference_bam_source(config: Config, iter_dir: Path) -> Path:
+    """The bam path `iter_dir`'s own consensus was actually called from --
+    same naming _plan_mapping/_run_mapping use for that iteration's mapping
+    output."""
+    if len(config.mappers) == 1:
+        return iter_dir / f"{config.mappers[0].name}.bam"
+    return iter_dir / "merged.bam"
+
+
 def _write_final_output(
     config: Config, out_dir: Path, last_iteration: int
-) -> tuple[Path | None, tuple[CommandRun, ...]]:
-    """Copy the last iteration's consensus.fasta to `[output].consensus_fasta`, if
-    set, then run `[output].commands` against it, if any are given.
+) -> tuple[Path | None, Path | None, Path | None, tuple[CommandRun, ...]]:
+    """Produce every configured [output] deliverable from the final iteration,
+    then run `[output].commands` against them, if any are given.
 
-    consensus_fasta is a template, rendered against the usual [run]
-    placeholders (plus {consensus_id}) -- most notably {output_dir}, since a
-    relative path is *not* auto-placed under out_dir: it's just a normal
-    relative path, resolved against the current working directory like any
-    other file argument. The copy itself is always a real copy, never a
-    symlink like reference_initial.fasta can be: this is meant to be a
-    small, standalone, portable deliverable, not a reference back into
+    consensus_fasta: copied (never symlinked -- see below) from the last
+    iteration's consensus.fasta. A template, rendered against the usual
+    [run] placeholders (plus {consensus_id}) -- most notably {output_dir},
+    since a relative path is *not* auto-placed under out_dir: it's just a
+    normal relative path, resolved against the current working directory
+    like any other file argument. The copy itself is always a real copy,
+    never a symlink like reference_initial.fasta can be: this is meant to be
+    a small, standalone, portable deliverable, not a reference back into
     out_dir's own working files.
+
+    final_reference_fasta/final_reference_bam: unlike consensus_fasta,
+    always *symlinks* (relative, via reference.symlink_reference) straight
+    into out_dir's own working files -- final_reference_fasta into the
+    second-last iteration's consensus.fasta (the reference used for the
+    final alignment step), final_reference_bam into the *final* iteration's
+    own bam (the one actually mapped against that reference and used to
+    call the final consensus -- one iteration dir apart from the
+    reference). A copy isn't an option here the way it is for
+    consensus_fasta: the bam's header embeds the reference name it was
+    mapped against, so renaming the fasta copy would desynchronize the two;
+    every iteration's consensus.fasta id gets a "-iteration-N" suffix (see
+    run()) specifically so this pairing stays valid without ever needing to
+    rewrite the bam. There's always a second-last iteration to point to,
+    since iterations 0 and 1 both always run (see preview()).
     """
     output = config.output
-    if output is None or output.consensus_fasta is None:
-        return None, ()
-    consensus_path = out_dir / f"iter_{last_iteration:03d}" / "consensus.fasta"
-    record = parse_fasta(consensus_path.read_text())[0]
-    record_id = output.consensus_id if output.consensus_id is not None else record.id
+    if output is None:
+        return None, None, None, ()
 
-    values: dict[str, object] = {**_run_level_values(config, out_dir), "consensus_id": record_id}
-    final_path = Path(render(output.consensus_fasta, values))
-    try:
-        write_fasta(final_path, record_id, record.sequence)
-    except OSError as exc:
-        raise RunnerError(f"could not write [output].consensus_fasta '{final_path}': {exc}") from exc
+    iter_dir = out_dir / f"iter_{last_iteration:03d}"
+    values: dict[str, object] = dict(_run_level_values(config, out_dir))
+
+    final_consensus_path: Path | None = None
+    if output.consensus_fasta is not None:
+        consensus_path = iter_dir / "consensus.fasta"
+        record = parse_fasta(consensus_path.read_text())[0]
+        # Strip the "-iteration-N" suffix run() adds to every iteration's
+        # consensus.fasta id (see final_reference_fasta/final_reference_bam
+        # below) -- that suffix exists to keep intermediate references
+        # unique, not to change what the final deliverable's own id
+        # defaults to.
+        iteration_suffix = f"-iteration-{last_iteration}"
+        own_id = record.id[: -len(iteration_suffix)] if record.id.endswith(iteration_suffix) else record.id
+        record_id = output.consensus_id if output.consensus_id is not None else own_id
+        values["consensus_id"] = record_id
+        final_consensus_path = Path(render(output.consensus_fasta, values))
+        try:
+            write_fasta(final_consensus_path, record_id, record.sequence)
+        except OSError as exc:
+            raise RunnerError(
+                f"could not write [output].consensus_fasta '{final_consensus_path}': {exc}"
+            ) from exc
+        values["consensus_fasta"] = str(final_consensus_path)
+
+    final_reference_fasta_path: Path | None = None
+    if output.final_reference_fasta is not None:
+        source_fasta = out_dir / f"iter_{last_iteration - 1:03d}" / "consensus.fasta"
+        final_reference_fasta_path = Path(render(output.final_reference_fasta, values))
+        try:
+            symlink_reference(final_reference_fasta_path, source_fasta)
+        except OSError as exc:
+            raise RunnerError(
+                f"could not symlink [output].final_reference_fasta "
+                f"'{final_reference_fasta_path}': {exc}"
+            ) from exc
+        values["final_reference_fasta"] = str(final_reference_fasta_path)
+
+    final_reference_bam_path: Path | None = None
+    if output.final_reference_bam is not None:
+        source_bam = _final_reference_bam_source(config, iter_dir)
+        final_reference_bam_path = Path(render(output.final_reference_bam, values))
+        try:
+            symlink_reference(final_reference_bam_path, source_bam)
+            symlink_reference(Path(f"{final_reference_bam_path}.bai"), Path(f"{source_bam}.bai"))
+        except OSError as exc:
+            raise RunnerError(
+                f"could not symlink [output].final_reference_bam '{final_reference_bam_path}': {exc}"
+            ) from exc
+        values["final_reference_bam"] = str(final_reference_bam_path)
 
     commands: list[CommandRun] = []
     if output.commands:
-        command_values = {**values, "consensus_fasta": str(final_path)}
         log_dir = out_dir / "logs"
         for i, step in enumerate(output.commands):
-            rendered = render_command(step, command_values)
+            rendered = render_command(step, values)
             name = f"output_command_{i:02d}"
             try:
                 commands.append(run_logged_command(name, rendered, log_dir))
             except CommandError as exc:
                 raise RunnerError(f"[output] command {i} failed: {exc}") from exc
 
-    return final_path, tuple(commands)
+    return final_consensus_path, final_reference_fasta_path, final_reference_bam_path, tuple(commands)
 
 
 @dataclass(frozen=True)
@@ -639,7 +719,12 @@ def run(
     resume = _load_resume_state(out_dir, config)
     if resume is not None and (resume.converged or resume.cycle is not None):
         final_iteration = _final_iteration_number(resume.records, resume.cycle)
-        final_consensus_path, output_commands = _write_final_output(config, out_dir, final_iteration)
+        (
+            final_consensus_path,
+            final_reference_fasta_path,
+            final_reference_bam_path,
+            output_commands,
+        ) = _write_final_output(config, out_dir, final_iteration)
         _write_summary_json(
             out_dir,
             resume.records,
@@ -655,6 +740,8 @@ def run(
             converged=resume.converged,
             total_elapsed_seconds=resume.total_elapsed_seconds,
             final_consensus_path=final_consensus_path,
+            final_reference_fasta_path=final_reference_fasta_path,
+            final_reference_bam_path=final_reference_bam_path,
             cycle=resume.cycle,
         )
 
@@ -721,7 +808,9 @@ def run(
             cat_resolver=cat_cache.resolve,
         )
         consensus_copy = iter_dir / "consensus.fasta"
-        write_fasta(consensus_copy, consensus_result.record_id, consensus_result.sequence)
+        write_fasta(
+            consensus_copy, f"{consensus_result.record_id}-iteration-{iteration}", consensus_result.sequence
+        )
         iteration_tool_versions.update(consensus_result.tool_versions)
         iteration_commands.extend(consensus_result.commands)
 
@@ -731,6 +820,7 @@ def run(
 
         elapsed = time.monotonic() - t0
         consensus_md5 = sequence_md5(consensus_result.sequence)
+        composition = base_composition(consensus_result.sequence)
         record = IterationRecord(
             iteration=iteration,
             reads_mapped=reads_mapped,
@@ -738,6 +828,7 @@ def run(
             identity_to_previous=identity,
             elapsed_seconds=elapsed,
             consensus_md5=consensus_md5,
+            ambiguous_count=ambiguous_count(composition),
         )
         records.append(record)
         _write_iteration_stats(
@@ -747,6 +838,7 @@ def run(
             identity,
             elapsed,
             consensus_md5,
+            composition,
             iteration_tool_versions,
             iteration_commands,
         )
@@ -780,7 +872,12 @@ def run(
 
     total_elapsed = prior_elapsed + (time.monotonic() - run_start)
     final_iteration = _final_iteration_number(records, cycle)
-    final_consensus_path, output_commands = _write_final_output(config, out_dir, final_iteration)
+    (
+        final_consensus_path,
+        final_reference_fasta_path,
+        final_reference_bam_path,
+        output_commands,
+    ) = _write_final_output(config, out_dir, final_iteration)
     _write_metrics_tsv(out_dir, records)
     _write_summary_json(out_dir, records, converged, total_elapsed, output_commands, cycle)
     write_report(out_dir)
@@ -791,6 +888,8 @@ def run(
         cycle=cycle,
         total_elapsed_seconds=total_elapsed,
         final_consensus_path=final_consensus_path,
+        final_reference_fasta_path=final_reference_fasta_path,
+        final_reference_bam_path=final_reference_bam_path,
     )
 
 

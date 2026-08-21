@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -13,7 +14,7 @@ from iterated_consensus.config import (
     OutputSpec,
 )
 from iterated_consensus.metrics import sequence_md5
-from iterated_consensus.reference import ReferenceError
+from iterated_consensus.reference import ReferenceError, parse_fasta
 from iterated_consensus.runner import RunnerError, preview, run
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -748,6 +749,153 @@ def test_output_section_copies_final_consensus(tmp_path: Path) -> None:
     assert result.final_consensus_path == final_path  # absolute -- used as given
 
 
+def test_iteration_consensus_fasta_ids_get_iteration_suffix(tmp_path: Path) -> None:
+    bam_path = tmp_path / "input.bam"
+    _make_synthetic_bam(bam_path)
+
+    consensus = ConsensusSpec(
+        steps=([sys.executable, str(FIXTURES / "write_fixed_fasta.py"), "{consensus_prefix}.fa"],),
+        output="{consensus_prefix}.fa",
+    )
+    out_dir = tmp_path / "out"
+    config = Config(
+        mappers=(_fake_bam_mapper(),),
+        consensus=consensus,
+        input=InputSpec(bam=bam_path),
+        max_iterations=10,
+    )
+    run(config, out_dir)
+
+    assert parse_fasta((out_dir / "iter_000" / "consensus.fasta").read_text())[0].id == "seed-iteration-0"
+    assert parse_fasta((out_dir / "iter_001" / "consensus.fasta").read_text())[0].id == "seed-iteration-1"
+
+
+def test_output_section_final_reference_fasta_and_bam_symlink(tmp_path: Path) -> None:
+    bam_path = tmp_path / "input.bam"
+    _make_synthetic_bam(bam_path)
+
+    consensus = ConsensusSpec(
+        steps=([sys.executable, str(FIXTURES / "write_fixed_fasta.py"), "{consensus_prefix}.fa"],),
+        output="{consensus_prefix}.fa",
+    )
+    out_dir = tmp_path / "out"
+    final_reference_fasta = tmp_path / "delivered" / "reference.fasta"
+    final_reference_bam = tmp_path / "delivered" / "reference.bam"
+    config = Config(
+        mappers=(_fake_bam_mapper(),),
+        consensus=consensus,
+        input=InputSpec(bam=bam_path),
+        output=OutputSpec(
+            final_reference_fasta=str(final_reference_fasta), final_reference_bam=str(final_reference_bam)
+        ),
+        max_iterations=10,
+    )
+    result = run(config, out_dir)
+
+    assert result.converged
+    assert len(result.iterations) == 2  # final iteration is iter_001, second-last is iter_000
+
+    assert final_reference_fasta.is_symlink()
+    assert final_reference_fasta.resolve() == (out_dir / "iter_000" / "consensus.fasta").resolve()
+    assert not os.path.isabs(os.readlink(final_reference_fasta))  # a relative symlink
+    assert final_reference_fasta.read_text() == (out_dir / "iter_000" / "consensus.fasta").read_text()
+
+    assert final_reference_bam.is_symlink()
+    assert final_reference_bam.resolve() == (out_dir / "iter_001" / "fake.bam").resolve()
+    assert not os.path.isabs(os.readlink(final_reference_bam))
+
+    bai_path = Path(f"{final_reference_bam}.bai")
+    assert bai_path.is_symlink()
+    assert bai_path.resolve() == (out_dir / "iter_001" / "fake.bam.bai").resolve()
+
+    assert result.final_reference_fasta_path == final_reference_fasta
+    assert result.final_reference_bam_path == final_reference_bam
+
+
+def test_output_section_final_reference_fields_independent_of_consensus_fasta(tmp_path: Path) -> None:
+    """final_reference_fasta/final_reference_bam don't need consensus_fasta set."""
+    bam_path = tmp_path / "input.bam"
+    _make_synthetic_bam(bam_path)
+
+    consensus = ConsensusSpec(
+        steps=([sys.executable, str(FIXTURES / "write_fixed_fasta.py"), "{consensus_prefix}.fa"],),
+        output="{consensus_prefix}.fa",
+    )
+    out_dir = tmp_path / "out"
+    final_reference_fasta = tmp_path / "reference.fasta"
+    config = Config(
+        mappers=(_fake_bam_mapper(),),
+        consensus=consensus,
+        input=InputSpec(bam=bam_path),
+        output=OutputSpec(final_reference_fasta=str(final_reference_fasta)),
+        max_iterations=10,
+    )
+    result = run(config, out_dir)
+
+    assert result.final_consensus_path is None
+    assert result.final_reference_fasta_path == final_reference_fasta
+    assert final_reference_fasta.exists()
+
+
+def test_output_section_final_reference_bam_uses_merged_bam_for_multiple_mappers(tmp_path: Path) -> None:
+    bam_path = tmp_path / "input.bam"
+    _make_synthetic_bam(bam_path)
+
+    consensus = ConsensusSpec(
+        steps=([sys.executable, str(FIXTURES / "write_fixed_fasta.py"), "{consensus_prefix}.fa"],),
+        output="{consensus_prefix}.fa",
+    )
+    out_dir = tmp_path / "out"
+    final_reference_bam = tmp_path / "reference.bam"
+    config = Config(
+        mappers=(_fake_bam_mapper("mapper_a"), _fake_bam_mapper("mapper_b")),
+        consensus=consensus,
+        input=InputSpec(bam=bam_path),
+        output=OutputSpec(final_reference_bam=str(final_reference_bam)),
+        max_iterations=10,
+    )
+    result = run(config, out_dir)
+
+    assert result.converged
+    assert final_reference_bam.resolve() == (out_dir / "iter_001" / "merged.bam").resolve()
+
+
+def test_output_section_final_reference_placeholders_available_to_commands(tmp_path: Path) -> None:
+    bam_path = tmp_path / "input.bam"
+    _make_synthetic_bam(bam_path)
+
+    consensus = ConsensusSpec(
+        steps=([sys.executable, str(FIXTURES / "write_fixed_fasta.py"), "{consensus_prefix}.fa"],),
+        output="{consensus_prefix}.fa",
+    )
+    out_dir = tmp_path / "out"
+    final_reference_fasta = tmp_path / "reference.fasta"
+    final_reference_bam = tmp_path / "reference.bam"
+    record_path = tmp_path / "recorded.txt"
+    config = Config(
+        mappers=(_fake_bam_mapper(),),
+        consensus=consensus,
+        input=InputSpec(bam=bam_path),
+        output=OutputSpec(
+            final_reference_fasta=str(final_reference_fasta),
+            final_reference_bam=str(final_reference_bam),
+            commands=(
+                [
+                    sys.executable,
+                    str(FIXTURES / "record_command.py"),
+                    str(record_path),
+                    "{final_reference_fasta}",
+                    "{final_reference_bam}",
+                ],
+            ),
+        ),
+        max_iterations=10,
+    )
+    run(config, out_dir)
+
+    assert record_path.read_text().splitlines() == [str(final_reference_fasta), str(final_reference_bam)]
+
+
 def test_output_section_relative_consensus_fasta_is_relative_to_cwd_not_out_dir(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1305,7 +1453,14 @@ def test_cycle_final_output_uses_first_occurrence(tmp_path: Path) -> None:
 
     assert result.cycle is not None
     assert result.final_consensus_path == final_path
-    assert final_path.read_text() == (tmp_path / "out" / "iter_000" / "consensus.fasta").read_text()
+    # iter_000/consensus.fasta carries the internal "-iteration-0" uniqueness
+    # suffix; the delivered final_path has it stripped back off (see
+    # _write_final_output), so only the sequence -- not the raw text -- matches.
+    iter0_record = parse_fasta((tmp_path / "out" / "iter_000" / "consensus.fasta").read_text())[0]
+    final_record = parse_fasta(final_path.read_text())[0]
+    assert final_record.sequence == iter0_record.sequence
+    assert final_record.id == "c"
+    assert iter0_record.id == "c-iteration-0"
 
 
 def test_cycle_of_period_three_finds_the_first_occurrence(tmp_path: Path) -> None:

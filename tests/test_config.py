@@ -441,6 +441,73 @@ commands = "not a list"
         parse_config(text)
 
 
+def test_output_section_final_reference_fields_parsed() -> None:
+    text = MAPPER + CONSENSUS + """
+[output]
+final_reference_fasta = "final/reference.fasta"
+final_reference_bam = "final/reference.bam"
+"""
+    config = parse_config(text)
+    assert config.output is not None
+    assert config.output.final_reference_fasta == "final/reference.fasta"
+    assert config.output.final_reference_bam == "final/reference.bam"
+
+
+def test_output_section_final_reference_fields_independent_of_consensus_fasta() -> None:
+    text = MAPPER + CONSENSUS + """
+[output]
+final_reference_fasta = "final/reference.fasta"
+"""
+    config = parse_config(text)
+    assert config.output is not None
+    assert config.output.consensus_fasta is None
+    assert config.output.final_reference_fasta == "final/reference.fasta"
+
+
+def test_output_section_final_reference_fasta_not_a_string_raises() -> None:
+    text = MAPPER + CONSENSUS + """
+[output]
+final_reference_fasta = 123
+"""
+    with pytest.raises(ConfigError, match="final_reference_fasta must be a string"):
+        parse_config(text)
+
+
+def test_output_section_final_reference_bam_not_a_string_raises() -> None:
+    text = MAPPER + CONSENSUS + """
+[output]
+final_reference_bam = 123
+"""
+    with pytest.raises(ConfigError, match="final_reference_bam must be a string"):
+        parse_config(text)
+
+
+def test_run_section_extra_var_colliding_with_final_reference_fasta_raises() -> None:
+    text = MAPPER + CONSENSUS + """
+[input]
+reads_single = ["s.fq"]
+reference_id = "NC_045512.2"
+
+[run]
+final_reference_fasta = "oops"
+"""
+    with pytest.raises(ConfigError, match="collide"):
+        parse_config(text)
+
+
+def test_run_section_extra_var_colliding_with_final_reference_bam_raises() -> None:
+    text = MAPPER + CONSENSUS + """
+[input]
+reads_single = ["s.fq"]
+reference_id = "NC_045512.2"
+
+[run]
+final_reference_bam = "oops"
+"""
+    with pytest.raises(ConfigError, match="collide"):
+        parse_config(text)
+
+
 def test_run_section_extra_var_colliding_with_consensus_fasta_raises() -> None:
     text = MAPPER + CONSENSUS + """
 [input]

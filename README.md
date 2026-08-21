@@ -36,9 +36,10 @@ iterated-consensus run --config pipelines.toml --output-dir results/ --progress
 ```
 
 `--progress` prints a one-line summary after each iteration (reads mapped,
-consensus length, identity to the previous consensus, time taken, and the
-consensus sequence's MD5 -- handy for confirming at a glance that two
-iterations (or two separate runs) produced byte-for-byte the same sequence).
+consensus length, number of ambiguous characters in the consensus, identity
+to the previous consensus, time taken, and the consensus sequence's MD5 --
+handy for confirming at a glance that two iterations (or two separate runs)
+produced byte-for-byte the same sequence).
 Every run also writes `results/index.html` -- open it in a browser for a
 summary and full per-iteration detail, no `--progress` needed.
 
@@ -99,8 +100,14 @@ reference_fasta = "starting_reference.fasta"  # a local file...
 #   "{output_dir}/final_consensus.fasta" to put it under --output-dir. See
 #   below.
 # consensus_id = "my-sample-name"              # optional new FASTA header
+# final_reference_fasta = "{output_dir}/final_reference.fasta"  # symlink to
+#   the reference used for the final alignment step -- see below
+# final_reference_bam = "{output_dir}/final_reference.bam"      # symlink to
+#   the BAM mapped against it and used to call the final consensus
 # commands = ["samtools faidx {consensus_fasta}"]   # optional -- run once
-#   consensus_fasta is written; {consensus_fasta}/{consensus_id} available
+#   consensus_fasta/final_reference_fasta/final_reference_bam are written;
+#   {consensus_fasta}/{consensus_id}/{final_reference_fasta}/
+#   {final_reference_bam} available
 
 [run]
 # output_dir = "results/"          # fallback for --output-dir; the CLI flag
@@ -254,8 +261,9 @@ steps = [
 A custom variable can't reuse a name iterated-consensus already sets itself
 (the dedicated `[run]` fields above, plus the per-iteration placeholders
 `reference`, `index_prefix`, `bam`, `consensus_prefix`, `reads_1`, `reads_2`,
-`reads_single`, `consensus_fasta`, `consensus_id`) -- that's rejected at
-config load time rather than silently shadowed.
+`reads_single`, `consensus_fasta`, `consensus_id`, `final_reference_fasta`,
+`final_reference_bam`) -- that's rejected at config load time rather than
+silently shadowed.
 
 **`threads = "auto"`** resolves to the number of CPUs actually available to
 the process (respecting container/cgroup/`taskset` limits on Linux, where
@@ -463,29 +471,58 @@ which `iter_NNN` was the last one.
   omitted, it keeps whatever id the consensus tool itself assigned.
   Requires `consensus_fasta` to also be given -- renaming with nowhere to
   write doesn't mean anything on its own.
+- `final_reference_fasta` -- where to put a copy of the reference used for
+  the final alignment step, i.e. the second-last iteration's
+  `consensus.fasta` (the last iteration's own `consensus.fasta` is the
+  *result*, not something it was aligned against). Same templating rules as
+  `consensus_fasta`. Unlike `consensus_fasta`, this is always a *relative
+  symlink* into `--output-dir`'s own `iter_NNN/consensus.fasta`, never a
+  copy: renaming it would desynchronize it from the reference name embedded
+  in `final_reference_bam`'s BAM header (see below), so it's left exactly as
+  iteration numbering produced it. Independent of `consensus_fasta` -- you
+  can set either, both, or neither. There's always a second-last iteration
+  to point to, since at least two iterations (`iter_000` and `iter_001`)
+  always run.
+- `final_reference_bam` -- where to put a copy of the BAM that was actually
+  mapped against `final_reference_fasta` and used to call the final
+  consensus. This lives in the *final* iteration's own directory (one
+  iteration dir apart from `final_reference_fasta`, since a BAM sits
+  alongside the consensus it produced, not the reference it was mapped
+  against). Also always a relative symlink, with a matching `.bam.bai`
+  symlink created alongside it automatically. Independent of
+  `consensus_fasta`/`final_reference_fasta` too.
 - `commands` -- steps (same `index_cmd`/`map_cmd`/`[consensus]` steps
   syntax: a list, each a list of argv tokens or a shell string) to run once
   `consensus_fasta` has been written. Requires `consensus_fasta` to also be
-  given. Two extra placeholders are available here on top of the usual ones
+  given. Extra placeholders are available here on top of the usual ones
   (`{threads}` and friends, any custom `[run]` variables -- see "Threads and
-  custom `[run]` variables"): `{consensus_fasta}` (the path just written) and
-  `{consensus_id}` (the id that ended up in it -- the resolved value, so
-  it's set even when `consensus_id` itself was left unset in the config).
+  custom `[run]` variables"), resolved to whichever of `consensus_fasta`/
+  `final_reference_fasta`/`final_reference_bam` were actually configured:
+  `{consensus_fasta}` (the path just written), `{consensus_id}` (the id that
+  ended up in it -- the resolved value, so it's set even when `consensus_id`
+  itself was left unset in the config), `{final_reference_fasta}`, and
+  `{final_reference_bam}` (the symlink paths just created).
   Logs go to `--output-dir/logs/output_command_NN.log`. A failing command
   aborts the run the same way a failing mapper/consensus step would.
 
 This always uses whichever iteration ran *last* -- converged or not, since
 even a run that hit `max_iterations` without converging usually still has a
-usable "current best" consensus worth having on hand. Both the copy and
-`commands` happen at the end of every `run()` call, including a resumed run
-that turns out to already be converged -- so re-running the same command is
-always safe (though note `commands` therefore also re-runs every time, e.g.
-on a repeated already-converged `run()` call -- keep that in mind for a
-command with side effects elsewhere, like an upload). Unlike
-`reference_initial.fasta` (see "Reference resolution" above), the copy
-itself is always a real copy, never a symlink: it's meant to be a small,
-standalone, portable deliverable, not a pointer back into `--output-dir`'s own
-working files.
+usable "current best" consensus worth having on hand (if a cycle was
+detected instead -- see "Cycle detection" below -- the first occurrence of
+the repeated consensus is used, not the last iteration actually run). Every
+configured deliverable (`consensus_fasta`, `final_reference_fasta`,
+`final_reference_bam`) and `commands` happen at the end of every `run()`
+call, including a resumed run that turns out to already be converged -- so
+re-running the same command is always safe (though note `commands`
+therefore also re-runs every time, e.g. on a repeated already-converged
+`run()` call -- keep that in mind for a command with side effects
+elsewhere, like an upload). Unlike `reference_initial.fasta` (see
+"Reference resolution" above), `consensus_fasta`'s copy is always a real
+copy, never a symlink: it's meant to be a small, standalone, portable
+deliverable, not a pointer back into `--output-dir`'s own working files.
+`final_reference_fasta`/`final_reference_bam` are the opposite: always
+symlinks, since they're meant to point back at those exact working files
+(see above).
 
 ## Output
 
@@ -507,6 +544,16 @@ the run started: build an index from the previous iteration's
 it, and call a new consensus. `iter_001` is therefore always the first
 iteration with an `identity_to_previous` value, since `iter_000` has nothing
 before it to compare against.
+
+Every iteration's `consensus.fasta` has `-iteration-N` appended to its FASTA
+id before it's written, so each one is uniquely named even when the
+underlying sequence repeats across iterations (e.g. after convergence) --
+that's what keeps a later iteration's BAM header (which embeds whatever
+reference name it was mapped against) matching up with
+`[output].final_reference_fasta`'s own id (see "Final output: `[output]`"
+above). The one exception is `[output].consensus_fasta` itself, whose
+default id has this suffix stripped back off, so it still defaults to
+whatever id your consensus tool originally assigned.
 
 ```
 results/

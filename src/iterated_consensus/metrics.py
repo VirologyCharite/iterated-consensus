@@ -61,6 +61,16 @@ def base_composition(seq: str) -> dict[str, int]:
     return dict(Counter(seq.upper()))
 
 
+UNAMBIGUOUS_BASES = ("A", "C", "G", "T")
+
+
+def ambiguous_count(composition: dict[str, int]) -> int:
+    """Count of characters in a base_composition() result that aren't plain
+    A/C/G/T -- IUPAC ambiguity codes, N, gaps, anything else."""
+    unambiguous = sum(composition.get(b, 0) for b in UNAMBIGUOUS_BASES)
+    return sum(composition.values()) - unambiguous
+
+
 def sequence_md5(seq: str) -> str:
     """Hex-digest MD5 of a sequence, case-normalized and with no whitespace --
     the convention used by NCBI/ENA for sequence checksums, so it's directly

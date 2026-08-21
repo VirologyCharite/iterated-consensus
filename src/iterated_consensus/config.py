@@ -36,7 +36,7 @@ _KNOWN_RUN_KEYS = frozenset(
 _RESERVED_PLACEHOLDER_NAMES = _KNOWN_RUN_KEYS | frozenset(
     {
         "reference", "index_prefix", "bam", "consensus_prefix", "reads_1", "reads_2", "reads_single",
-        "consensus_fasta", "consensus_id",
+        "consensus_fasta", "consensus_id", "final_reference_fasta", "final_reference_bam",
     }
 )
 
@@ -132,12 +132,29 @@ class OutputSpec:
     like any other file argument. Use "{output_dir}/..." explicitly to put
     it under --output-dir."""
     consensus_id: str | None = None
+    final_reference_fasta: str | None = None
+    """A template string like consensus_fasta, rendered against the usual
+    [run] placeholders (plus {consensus_fasta}/{consensus_id}, if those are
+    also set). The file this produces is always a relative symlink -- into
+    the second-last iteration's directory, pointing at that iteration's
+    consensus.fasta, which is the reference used for the final alignment
+    step before the final consensus was called -- never a real copy: a copy
+    under a different name would no longer match the reference name embedded
+    in final_reference_bam's own BAM header."""
+    final_reference_bam: str | None = None
+    """Like final_reference_fasta, but a symlink to the actual BAM mapped
+    against that reference and used to call the final consensus. That BAM
+    lives in the *final* iteration's own directory, not the second-last one
+    (the reference and the BAM mapped against it are one iteration apart).
+    A same-named '.bai' symlink is created alongside it automatically."""
     commands: tuple[CommandStep, ...] = ()
-    """Run once, after consensus_fasta is written, in order. {consensus_fasta}
-    and {consensus_id} are available as placeholders (alongside every other
-    placeholder [run] commands can use), resolved to the final values --
-    the actual id used, even if consensus_id itself was left unset and the
-    consensus tool's own id was kept."""
+    """Run once, after consensus_fasta/final_reference_fasta/final_reference_bam
+    are written, in order. {consensus_fasta}, {consensus_id},
+    {final_reference_fasta}, and {final_reference_bam} are available as
+    placeholders (alongside every other placeholder [run] commands can use)
+    for whichever of those were actually configured -- {consensus_id}
+    resolved to the actual id used, even if consensus_id itself was left
+    unset and the consensus tool's own id was kept."""
 
     def validate(self) -> None:
         if self.consensus_id is not None and self.consensus_fasta is None:
@@ -312,6 +329,16 @@ def _parse_output(raw: dict) -> OutputSpec:
     consensus_fasta = raw.get("consensus_fasta")
     if consensus_fasta is not None and not isinstance(consensus_fasta, str):
         raise ConfigError(f"[output] consensus_fasta must be a string, got {consensus_fasta!r}")
+    final_reference_fasta = raw.get("final_reference_fasta")
+    if final_reference_fasta is not None and not isinstance(final_reference_fasta, str):
+        raise ConfigError(
+            f"[output] final_reference_fasta must be a string, got {final_reference_fasta!r}"
+        )
+    final_reference_bam = raw.get("final_reference_bam")
+    if final_reference_bam is not None and not isinstance(final_reference_bam, str):
+        raise ConfigError(
+            f"[output] final_reference_bam must be a string, got {final_reference_bam!r}"
+        )
     commands_raw = raw.get("commands", [])
     if not isinstance(commands_raw, list):
         raise ConfigError("[output] commands must be a list")
@@ -319,6 +346,8 @@ def _parse_output(raw: dict) -> OutputSpec:
     return OutputSpec(
         consensus_fasta=consensus_fasta,
         consensus_id=raw.get("consensus_id"),
+        final_reference_fasta=final_reference_fasta,
+        final_reference_bam=final_reference_bam,
         commands=commands,
     )
 
