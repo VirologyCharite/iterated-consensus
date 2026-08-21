@@ -1,3 +1,7 @@
+# 0.2.6 August 21, 2026
+
+Add symlink to `final-reference.fasta.fai` if the `.fai` file exists.
+
 # 0.2.5 August 21, 2026
 
 Allow `output_dir` in the config. Add `[tool-versions]` so the summary

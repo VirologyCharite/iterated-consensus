@@ -77,6 +77,7 @@ output = "{consensus_prefix}.fa"
 # final_reference_fasta = "{output_dir}/final_reference.fasta"  # optional --
 #   a relative symlink to the reference used for the final alignment step
 #   (the second-last iteration's consensus.fasta), independent of the above
+#   (plus a matching .fai symlink, but only if one already exists there)
 # final_reference_bam = "{output_dir}/final_reference.bam"      # optional --
 #   a relative symlink to the BAM mapped against it and used to call the
 #   final consensus (plus a matching .bam.bai symlink), independent too

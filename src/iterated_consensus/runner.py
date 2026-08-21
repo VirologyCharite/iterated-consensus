@@ -564,6 +564,13 @@ def _write_final_output(
     run()) specifically so this pairing stays valid without ever needing to
     rewrite the bam. There's always a second-last iteration to point to,
     since iterations 0 and 1 both always run (see preview()).
+
+    final_reference_bam's .bam.bai symlink is unconditional -- ensure_indexed
+    guarantees a .bai next to every mapping's bam (see _run_mapping). A
+    source .fai next to final_reference_fasta's consensus.fasta isn't
+    guaranteed the same way (only some [consensus] pipelines happen to index
+    the reference as a side effect, e.g. samtools mpileup), so that symlink
+    is only made when a source .fai actually exists.
     """
     output = config.output
     if output is None:
@@ -600,6 +607,9 @@ def _write_final_output(
         final_reference_fasta_path = Path(render(output.final_reference_fasta, values))
         try:
             symlink_reference(final_reference_fasta_path, source_fasta)
+            source_fai = Path(f"{source_fasta}.fai")
+            if source_fai.exists():
+                symlink_reference(Path(f"{final_reference_fasta_path}.fai"), source_fai)
         except OSError as exc:
             raise RunnerError(
                 f"could not symlink [output].final_reference_fasta "

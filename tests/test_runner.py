@@ -15,7 +15,7 @@ from iterated_consensus.config import (
 )
 from iterated_consensus.metrics import sequence_md5
 from iterated_consensus.reference import ReferenceError, parse_fasta
-from iterated_consensus.runner import RunnerError, preview, run
+from iterated_consensus.runner import RunnerError, _write_final_output, preview, run
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -808,8 +808,51 @@ def test_output_section_final_reference_fasta_and_bam_symlink(tmp_path: Path) ->
     assert bai_path.is_symlink()
     assert bai_path.resolve() == (out_dir / "iter_001" / "fake.bam.bai").resolve()
 
+    # No .fai was ever created next to iter_000/consensus.fasta (the fixture
+    # consensus caller doesn't index its output), so no .fai symlink either.
+    assert not Path(f"{final_reference_fasta}.fai").exists()
+
     assert result.final_reference_fasta_path == final_reference_fasta
     assert result.final_reference_bam_path == final_reference_bam
+
+
+def test_output_section_final_reference_fasta_symlinks_fai_when_present(tmp_path: Path) -> None:
+    bam_path = tmp_path / "input.bam"
+    _make_synthetic_bam(bam_path)
+
+    consensus = ConsensusSpec(
+        steps=([sys.executable, str(FIXTURES / "write_fixed_fasta.py"), "{consensus_prefix}.fa"],),
+        output="{consensus_prefix}.fa",
+    )
+    out_dir = tmp_path / "out"
+    final_reference_fasta = tmp_path / "delivered" / "reference.fasta"
+    config = Config(
+        mappers=(_fake_bam_mapper(),),
+        consensus=consensus,
+        input=InputSpec(bam=bam_path),
+        output=OutputSpec(final_reference_fasta=str(final_reference_fasta)),
+        max_iterations=10,
+    )
+    result = run(config, out_dir)
+    assert result.converged
+    assert len(result.iterations) == 2  # final iteration is iter_001, second-last is iter_000
+
+    # Simulate a [consensus] pipeline that happens to index the reference it
+    # was called against (e.g. samtools mpileup) -- write a .fai next to the
+    # second-last iteration's consensus.fasta directly, after the fact, so
+    # this only exercises the symlinking, not any particular indexer.
+    source_fasta = out_dir / "iter_000" / "consensus.fasta"
+    source_fai = Path(f"{source_fasta}.fai")
+    source_fai.write_text("seed-iteration-0\t20\t6\t20\t21\n")
+
+    final_consensus_path, final_reference_fasta_path, _, _ = _write_final_output(config, out_dir, 1)
+    assert final_consensus_path is None  # consensus_fasta wasn't set
+    assert final_reference_fasta_path == final_reference_fasta
+
+    fai_path = Path(f"{final_reference_fasta}.fai")
+    assert fai_path.is_symlink()
+    assert fai_path.resolve() == source_fai.resolve()
+    assert not os.path.isabs(os.readlink(fai_path))
 
 
 def test_output_section_final_reference_fields_independent_of_consensus_fasta(tmp_path: Path) -> None:

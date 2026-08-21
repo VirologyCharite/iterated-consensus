@@ -479,10 +479,16 @@ which `iter_NNN` was the last one.
   symlink* into `--output-dir`'s own `iter_NNN/consensus.fasta`, never a
   copy: renaming it would desynchronize it from the reference name embedded
   in `final_reference_bam`'s BAM header (see below), so it's left exactly as
-  iteration numbering produced it. Independent of `consensus_fasta` -- you
-  can set either, both, or neither. There's always a second-last iteration
-  to point to, since at least two iterations (`iter_000` and `iter_001`)
-  always run.
+  iteration numbering produced it. If a `.fai` already sits next to that
+  `consensus.fasta` (some `[consensus]` pipelines index the reference as a
+  side effect, e.g. `samtools mpileup -f`), a matching `.fai` symlink is
+  created alongside it too -- unlike `final_reference_bam`'s `.bam.bai`
+  (always present, since mapping always indexes its own BAM), a source
+  `.fai` isn't guaranteed to exist, so it's skipped rather than left
+  dangling when there isn't one. Independent of `consensus_fasta` -- you can
+  set either, both, or neither. There's always a second-last iteration to
+  point to, since at least two iterations (`iter_000` and `iter_001`) always
+  run.
 - `final_reference_bam` -- where to put a copy of the BAM that was actually
   mapped against `final_reference_fasta` and used to call the final
   consensus. This lives in the *final* iteration's own directory (one
