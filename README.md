@@ -1,8 +1,5 @@
 # Iterated consensus sequence
 
-*NOTE* This package is only a day old, so you should expect occasional
-breaking changes!
-
 Iteratively build a consensus sequence: call a consensus from a BAM
 (or an initial reference), build a mapper index from it, remap the
 original reads against it, call a new consensus, and repeat until the
@@ -21,18 +18,26 @@ and writing code, tests, and documentation.
 
 ## Install
 
-```
-uv add iterated-consensus     # or: pip install iterated-consensus
+```sh
+$ uv add iterated-consensus     # or: pip install iterated-consensus
 ```
 
 ## Quick start
 
-```
-iterated-consensus config-template                  # list bundled presets
-iterated-consensus config-template bowtie2-ivar > pipelines.toml
-# edit pipelines.toml: fill in [input], adjust commands/threads as needed
-iterated-consensus run --config pipelines.toml --output-dir results/ --dry-run  # preview
-iterated-consensus run --config pipelines.toml --output-dir results/ --progress
+```sh
+# See a list of example config templates.
+$ iterated-consensus config-template
+
+# Make an example TOML configuration file (here using bowtie2 and iVar):
+$ iterated-consensus config-template bowtie2-ivar > config.toml
+
+# Then edit config.toml: fill in [input], adjust commands/threads as needed.
+
+# Preview a run to see what commands would be executed.
+$ iterated-consensus run --config config.toml --output-dir results --dry-run
+
+# Or run with a progress indicator:
+$ iterated-consensus run --config config.toml --output-dir results --progress
 ```
 
 `--progress` prints a one-line summary after each iteration (reads mapped,
