@@ -217,6 +217,8 @@ max_iterations = 5
     header_lines = [line for line in lines if line.startswith("iter")]
     assert len(header_lines) == 1  # column names appear once, not per iteration
     assert "reads_mapped" in header_lines[0]
+    assert "formerly_ambiguous" in header_lines[0]
+    assert "newly_ambiguous" in header_lines[0]
     assert "consensus_length" in header_lines[0]
     assert "identity_to_previous" in header_lines[0]
     assert "elapsed" in header_lines[0]

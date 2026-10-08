@@ -158,12 +158,16 @@ def _table_rows(iterations: list[dict]) -> str:
         # .get, not [] -- a resumed run's summary.json may predate this field.
         md5 = it.get("consensus_md5") or "—"
         ambiguous = format_ambiguous_count(_ambiguous_count(it.get("composition", {})))
+        formerly_ambiguous = format_ambiguous_count(it.get("formerly_ambiguous_count"))
+        newly_ambiguous = format_ambiguous_count(it.get("newly_ambiguous_count"))
         rows.append(
             "<tr>"
             f"<td>{it['iteration']}</td>"
             f"<td>{it['reads_mapped']:,}</td>"
             f"<td>{it['consensus_length']:,}</td>"
             f"<td>{ambiguous}</td>"
+            f"<td>{formerly_ambiguous}</td>"
+            f"<td>{newly_ambiguous}</td>"
             f"<td>{format_identity(it['identity_to_previous'])}</td>"
             f"<td>{format_elapsed(it['elapsed_seconds'])}</td>"
             f"<td><code>{md5}</code></td>"
@@ -489,7 +493,7 @@ def render_report_html(summary: dict) -> str:
 <section class="card">
   <h2>Per-iteration detail</h2>
   <table>
-    <thead><tr><th>Iteration</th><th>Reads mapped</th><th>Consensus length</th><th>Ambiguous</th><th>Identity to previous</th><th>Elapsed</th><th>Consensus MD5</th></tr></thead>
+    <thead><tr><th>Iteration</th><th>Reads mapped</th><th>Consensus length</th><th>Ambiguous</th><th>Formerly ambiguous</th><th>Newly ambiguous</th><th>Identity to previous</th><th>Elapsed</th><th>Consensus MD5</th></tr></thead>
     <tbody>
 {_table_rows(iterations)}
     </tbody>

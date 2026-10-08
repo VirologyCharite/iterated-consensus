@@ -71,6 +71,51 @@ def ambiguous_count(composition: dict[str, int]) -> int:
     return sum(composition.values()) - unambiguous
 
 
+@dataclass(frozen=True)
+class AmbiguityTransitions:
+    formerly_ambiguous: int
+    """Sites that were ambiguous (not plain A/C/G/T) in the previous
+    sequence but are unambiguous in the current one."""
+    newly_ambiguous: int
+    """Sites that were unambiguous in the previous sequence but are
+    ambiguous in the current one."""
+
+
+def ambiguity_transitions(previous: str, current: str) -> AmbiguityTransitions:
+    """Count sites whose ambiguity status flipped between two sequences.
+
+    Aligns `previous` to `current` (global alignment via edlib, same method
+    as sequence_identity) and compares ambiguity status -- plain A/C/G/T vs.
+    anything else -- at each aligned (match/substitution) column. Inserted
+    or deleted sites have no counterpart in the other sequence, so they
+    aren't counted toward either total.
+    """
+    if not previous or not current:
+        raise ValueError("cannot compare ambiguity transitions of an empty sequence")
+    cigar = edlib.align(previous, current, mode="NW", task="path")["cigar"]
+    formerly_ambiguous = newly_ambiguous = 0
+    i = j = 0
+    for n, op in _CIGAR_OP_RE.findall(cigar):
+        n = int(n)
+        if op in ("=", "X", "M"):
+            for _ in range(n):
+                prev_ambiguous = previous[i].upper() not in UNAMBIGUOUS_BASES
+                curr_ambiguous = current[j].upper() not in UNAMBIGUOUS_BASES
+                if prev_ambiguous and not curr_ambiguous:
+                    formerly_ambiguous += 1
+                elif curr_ambiguous and not prev_ambiguous:
+                    newly_ambiguous += 1
+                i += 1
+                j += 1
+        elif op == "D":
+            # A site present in `current` with no counterpart in `previous`.
+            j += n
+        else:  # "I"
+            # A site present in `previous` with no counterpart in `current`.
+            i += n
+    return AmbiguityTransitions(formerly_ambiguous=formerly_ambiguous, newly_ambiguous=newly_ambiguous)
+
+
 def sequence_md5(seq: str) -> str:
     """Hex-digest MD5 of a sequence, case-normalized and with no whitespace --
     the convention used by NCBI/ENA for sequence checksums, so it's directly

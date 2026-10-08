@@ -79,6 +79,52 @@ def test_fastq_start_converges_and_writes_outputs(tmp_path: Path) -> None:
     assert stats["consensus_md5"] == expected_md5
 
 
+def test_ambiguity_transitions_recorded_and_written(tmp_path: Path) -> None:
+    bam_path = tmp_path / "input.bam"
+    _make_synthetic_bam(bam_path)
+
+    config = Config(
+        mappers=(_fake_bam_mapper(),),
+        consensus=ConsensusSpec(
+            steps=(
+                [
+                    sys.executable,
+                    str(FIXTURES / "write_sequence_with_ambiguity.py"),
+                    "{consensus_prefix}.fa",
+                ],
+            ),
+            output="{consensus_prefix}.fa",
+        ),
+        input=InputSpec(bam=bam_path),
+        max_iterations=1,
+    )
+    out_dir = tmp_path / "out"
+    result = run(config, out_dir)
+
+    # iter_000 = "ACGNACGT" (1 ambiguous site), iter_001 = "ACGTACGN": the N
+    # at position 3 resolved, and a new one appeared at the last position.
+    assert result.iterations[0].ambiguous_count == 1
+    assert result.iterations[0].formerly_ambiguous_count is None  # no previous consensus
+    assert result.iterations[0].newly_ambiguous_count is None
+    assert result.iterations[1].ambiguous_count == 1
+    assert result.iterations[1].formerly_ambiguous_count == 1
+    assert result.iterations[1].newly_ambiguous_count == 1
+
+    stats = json.loads((out_dir / "iter_001" / "stats.json").read_text())
+    assert stats["formerly_ambiguous_count"] == 1
+    assert stats["newly_ambiguous_count"] == 1
+
+    metrics_lines = (out_dir / "metrics.tsv").read_text().splitlines()
+    header = metrics_lines[0].split("\t")
+    assert header[3:6] == ["ambiguous_count", "formerly_ambiguous_count", "newly_ambiguous_count"]
+    assert metrics_lines[1].split("\t")[3:6] == ["1", "", ""]  # iter_000
+    assert metrics_lines[2].split("\t")[3:6] == ["1", "1", "1"]  # iter_001
+
+    html = (out_dir / "index.html").read_text()
+    assert "Formerly ambiguous" in html
+    assert "Newly ambiguous" in html
+
+
 def test_on_iteration_callback_fires_once_per_executed_iteration(tmp_path: Path) -> None:
     reference = tmp_path / "ref.fasta"
     reference.write_text(">ref1\nACGTACGTACGTACGTACGT\n")

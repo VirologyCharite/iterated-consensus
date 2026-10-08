@@ -4,6 +4,7 @@ import pytest
 
 from iterated_consensus.metrics import (
     ConvergenceState,
+    ambiguity_transitions,
     base_composition,
     check_convergence,
     sequence_identity,
@@ -97,3 +98,48 @@ def test_sequence_md5_ignores_whitespace() -> None:
 
 def test_sequence_md5_differs_for_different_sequences() -> None:
     assert sequence_md5("ACGT") != sequence_md5("ACGA")
+
+
+def test_ambiguity_transitions_no_change() -> None:
+    result = ambiguity_transitions("ACGTACGT", "ACGTACGT")
+    assert result.formerly_ambiguous == 0
+    assert result.newly_ambiguous == 0
+
+
+def test_ambiguity_transitions_resolved_site() -> None:
+    result = ambiguity_transitions("ACGNACGT", "ACGTACGT")
+    assert result.formerly_ambiguous == 1
+    assert result.newly_ambiguous == 0
+
+
+def test_ambiguity_transitions_newly_ambiguous_site() -> None:
+    result = ambiguity_transitions("ACGTACGT", "ACGNACGT")
+    assert result.formerly_ambiguous == 0
+    assert result.newly_ambiguous == 1
+
+
+def test_ambiguity_transitions_both_directions() -> None:
+    result = ambiguity_transitions("ACGNACGT", "ACGTACGN")
+    assert result.formerly_ambiguous == 1
+    assert result.newly_ambiguous == 1
+
+
+def test_ambiguity_transitions_is_case_insensitive() -> None:
+    result = ambiguity_transitions("acgnacgt", "ACGTACGT")
+    assert result.formerly_ambiguous == 1
+    assert result.newly_ambiguous == 0
+
+
+def test_ambiguity_transitions_ignores_indel_sites() -> None:
+    # The inserted "N" has no counterpart in `previous`, so it isn't counted
+    # as newly ambiguous -- only same-site flips are.
+    result = ambiguity_transitions("ACGT", "ACNGT")
+    assert result.formerly_ambiguous == 0
+    assert result.newly_ambiguous == 0
+
+
+def test_ambiguity_transitions_empty_sequence_raises() -> None:
+    with pytest.raises(ValueError, match="empty"):
+        ambiguity_transitions("", "ACGT")
+    with pytest.raises(ValueError, match="empty"):
+        ambiguity_transitions("ACGT", "")

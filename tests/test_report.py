@@ -119,6 +119,33 @@ def test_render_report_html_table_ambiguous_count_dash_when_no_composition() -> 
     assert "<td>—</td>" in html
 
 
+def test_render_report_html_table_includes_ambiguity_transitions() -> None:
+    summary = {
+        **SAMPLE_SUMMARY,
+        "iterations": [
+            {**SAMPLE_SUMMARY["iterations"][0]},
+            {
+                **SAMPLE_SUMMARY["iterations"][1],
+                "formerly_ambiguous_count": 3,
+                "newly_ambiguous_count": 1,
+            },
+            {**SAMPLE_SUMMARY["iterations"][2]},
+        ],
+    }
+    html = render_report_html(summary)
+    assert "Formerly ambiguous" in html
+    assert "Newly ambiguous" in html
+    assert "<td>3</td>" in html
+    assert "<td>1</td>" in html
+
+
+def test_render_report_html_table_ambiguity_transitions_dash_when_absent() -> None:
+    # A resumed run's summary.json may predate these fields (or iter_000,
+    # which has no previous consensus to compare against).
+    html = render_report_html(SAMPLE_SUMMARY)
+    assert html.count("<td>—</td>") >= 2
+
+
 def test_render_report_html_stopped_status() -> None:
     summary = {**SAMPLE_SUMMARY, "converged": False}
     html = render_report_html(summary)

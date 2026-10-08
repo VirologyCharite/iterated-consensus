@@ -41,9 +41,11 @@ $ iterated-consensus run --config config.toml --output-dir results --progress
 ```
 
 `--progress` prints a one-line summary after each iteration (reads mapped,
-consensus length, number of ambiguous characters in the consensus, identity
-to the previous consensus, time taken, and the consensus sequence's MD5 --
-handy for confirming at a glance that two iterations (or two separate runs)
+consensus length, number of ambiguous characters in the consensus and how
+many of those sites newly became ambiguous or stopped being ambiguous since
+the previous iteration (see "Ambiguity transitions" below), identity to the
+previous consensus, time taken, and the consensus sequence's MD5 -- handy
+for confirming at a glance that two iterations (or two separate runs)
 produced byte-for-byte the same sequence).
 Every run also writes `results/index.html` -- open it in a browser for a
 summary and full per-iteration detail, no `--progress` needed.
@@ -577,7 +579,8 @@ results/
     merged.bam                 (only if >1 mapper) merged BAM the consensus step sees
     consensus.fasta             this iteration's consensus
     stats.json                  reads mapped, length, identity to previous, consensus MD5,
-                                 base composition, tool versions, per-command logs -- see below
+                                 base composition, ambiguity transition counts, tool versions,
+                                 per-command logs -- see below
     logs/                        captured stdout+stderr of every command run
   iter_001/
     <mapper>_index.*         index files, one set per configured mapper
@@ -585,7 +588,8 @@ results/
     merged.bam                 (only if >1 mapper) merged BAM the consensus step sees
     consensus.fasta             this iteration's consensus
     stats.json                  reads mapped, length, identity to previous, consensus MD5,
-                                 base composition, tool versions, per-command logs -- see below
+                                 base composition, ambiguity transition counts, tool versions,
+                                 per-command logs -- see below
     logs/                        captured stdout+stderr of every command run
   iter_002/
     ...
@@ -619,6 +623,41 @@ a fraction of just the unambiguous bases, since ambiguity codes and gaps
 aren't G or C by definition and would otherwise just dilute the number.
 This data lives in each iteration's `stats.json` under `"composition"` too
 (every iteration's, not just the final one's), if you want it directly.
+
+### Ambiguity transitions: `formerly_ambiguous`/`newly_ambiguous`
+
+Each iteration's `ambiguous` count is just how many characters in that
+iteration's consensus aren't plain A/C/G/T. Two more columns --
+`formerly_ambiguous` and `newly_ambiguous` -- show *why* that count moved
+from the previous iteration: `formerly_ambiguous` is how many sites were
+ambiguous in the previous consensus but aren't in this one, and
+`newly_ambiguous` is how many sites were unambiguous before but are
+ambiguous now. Both appear in `--progress`, `index.html`'s per-iteration
+table, and `metrics.tsv`; both are blank/`None` for `iter_000`, which has no
+previous consensus to compare against.
+
+These counts come from the same global alignment used for
+`identity_to_previous`, and only count sites that have a counterpart in
+*both* consensus sequences (an aligned match or substitution). A site that
+was inserted or deleted between iterations isn't counted as "newly
+ambiguous" or "formerly ambiguous" even if it's an ambiguity code -- as far
+as these two columns are concerned, it isn't the same site changing status,
+it's a different site altogether.
+
+This matters for the arithmetic: **`formerly_ambiguous - newly_ambiguous`
+only equals the drop in the `ambiguous` count when `consensus_length` is
+unchanged from the previous iteration.** If the length *did* change (i.e.
+there were insertions or deletions, not just substitutions), an ambiguous
+site can be deleted outright -- lowering the total `ambiguous` count
+without being reflected in `formerly_ambiguous` -- or an ambiguous site can
+be inserted -- raising the total without being reflected in
+`newly_ambiguous`. For example, `ambiguous` dropping by 51 while
+`formerly_ambiguous` is 38 and `newly_ambiguous` is 13 (which only account
+for a drop of 25) isn't a bug: the other 26 comes from indels removing more
+ambiguous sites than they added. Check whether `consensus_length` changed
+between the two iterations before expecting the naive
+`formerly_ambiguous - newly_ambiguous` subtraction to reconcile with the
+change in `ambiguous`.
 
 ### Logs
 

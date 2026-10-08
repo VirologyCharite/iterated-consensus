@@ -68,7 +68,9 @@ from .config import Config, ConsensusSpec, InputSpec
 from .consensus import ConsensusResult, run_consensus
 from .errors import IteratedConsensusError
 from .metrics import (
+    AmbiguityTransitions,
     ConvergenceState,
+    ambiguity_transitions,
     ambiguous_count,
     base_composition,
     check_convergence,
@@ -112,6 +114,16 @@ class IterationRecord:
     ambiguity codes, N, gaps, anything else (see metrics.ambiguous_count).
     Defaults to None only so summary.json written before this field existed
     can still be resumed; every freshly-computed record always sets it."""
+    formerly_ambiguous_count: int | None = None
+    """Sites that were ambiguous in the previous iteration's consensus but
+    are unambiguous in this one (see metrics.ambiguity_transitions). None
+    for iter_000, which has no previous consensus to compare against, and
+    for records from a summary.json written before this field existed."""
+    newly_ambiguous_count: int | None = None
+    """Sites that were unambiguous in the previous iteration's consensus but
+    are ambiguous in this one (see metrics.ambiguity_transitions). None for
+    iter_000, which has no previous consensus to compare against, and for
+    records from a summary.json written before this field existed."""
 
 
 @dataclass(frozen=True)
@@ -449,6 +461,7 @@ def _write_iteration_stats(
     elapsed: float,
     consensus_md5: str,
     composition: dict[str, int],
+    transitions: AmbiguityTransitions | None,
     tool_versions: dict[str, str],
     commands: list[CommandRun],
 ) -> None:
@@ -459,6 +472,8 @@ def _write_iteration_stats(
         "elapsed_seconds": elapsed,
         "consensus_md5": consensus_md5,
         "composition": composition,
+        "formerly_ambiguous_count": transitions.formerly_ambiguous if transitions else None,
+        "newly_ambiguous_count": transitions.newly_ambiguous if transitions else None,
         "tool_versions": tool_versions,
         "commands": [asdict(c) for c in commands],
     }
@@ -467,12 +482,17 @@ def _write_iteration_stats(
 
 def _write_metrics_tsv(out_dir: Path, records: list[IterationRecord]) -> None:
     lines = [
-        "iteration\treads_mapped\tconsensus_length\tidentity_to_previous\telapsed_seconds\tconsensus_md5"
+        "iteration\treads_mapped\tconsensus_length\tambiguous_count\tformerly_ambiguous_count\t"
+        "newly_ambiguous_count\tidentity_to_previous\telapsed_seconds\tconsensus_md5"
     ]
     for r in records:
         identity = "" if r.identity_to_previous is None else f"{r.identity_to_previous:.4f}"
+        ambiguous = "" if r.ambiguous_count is None else str(r.ambiguous_count)
+        formerly_ambiguous = "" if r.formerly_ambiguous_count is None else str(r.formerly_ambiguous_count)
+        newly_ambiguous = "" if r.newly_ambiguous_count is None else str(r.newly_ambiguous_count)
         lines.append(
-            f"{r.iteration}\t{r.reads_mapped}\t{r.consensus_length}\t{identity}\t"
+            f"{r.iteration}\t{r.reads_mapped}\t{r.consensus_length}\t{ambiguous}\t"
+            f"{formerly_ambiguous}\t{newly_ambiguous}\t{identity}\t"
             f"{r.elapsed_seconds:.3f}\t{r.consensus_md5 or ''}"
         )
     (out_dir / "metrics.tsv").write_text("\n".join(lines) + "\n")
@@ -825,8 +845,10 @@ def run(
         iteration_commands.extend(consensus_result.commands)
 
         identity: float | None = None
+        transitions: AmbiguityTransitions | None = None
         if previous_sequence is not None:
             identity = sequence_identity(previous_sequence, consensus_result.sequence).identity
+            transitions = ambiguity_transitions(previous_sequence, consensus_result.sequence)
 
         elapsed = time.monotonic() - t0
         consensus_md5 = sequence_md5(consensus_result.sequence)
@@ -839,6 +861,8 @@ def run(
             elapsed_seconds=elapsed,
             consensus_md5=consensus_md5,
             ambiguous_count=ambiguous_count(composition),
+            formerly_ambiguous_count=transitions.formerly_ambiguous if transitions else None,
+            newly_ambiguous_count=transitions.newly_ambiguous if transitions else None,
         )
         records.append(record)
         _write_iteration_stats(
@@ -849,6 +873,7 @@ def run(
             elapsed,
             consensus_md5,
             composition,
+            transitions,
             iteration_tool_versions,
             iteration_commands,
         )
